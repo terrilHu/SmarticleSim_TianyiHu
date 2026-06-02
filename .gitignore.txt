@@ -1,0 +1,4 @@
+datafile/
+videos/
+init_conditions/
+spawn_images/
