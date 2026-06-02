@@ -18,7 +18,7 @@ from spawn import (spawn_smarticles, spawn_smarticles_norelax,
 from naming import generate_trial_name
 
 # =========================
-# 参数
+# Parameters
 # =========================
 N_TRIALS = 200
 
@@ -33,29 +33,29 @@ IMAGE_DIR = os.path.join("spawn_images",    _EXP_NAME)
 
 
 # =========================
-# 可视化与保存 debug (修改版)
+# Visualization and debug saving (revised)
 # =========================
 def save_layout_image(smarts, center, inner_r, filepath):
     """
-    无弹窗离线渲染：将当前机器人的物理位置直接绘制在内存 Surface 上，并保存为 jpg
+    Offline rendering without popup: draw robot positions onto an in-memory Surface and save as jpg
     """
     if not pygame.get_init():
         pygame.init()
         
-    # 创建一个纯内存的 Surface，不需要调用 set_mode 产生弹窗
+    # Create a pure in-memory Surface without calling set_mode to avoid popup windows
     surface = pygame.Surface((W, H))
     surface.fill((255, 255, 255))
     
-    # 绘制外圈物理墙壁的示意图（浅灰色）
+    # Draw the outer physical wall boundary (light gray)
     pygame.draw.circle(surface, (220, 220, 220), (int(center.x), int(center.y)), int(inner_r + WALL_THICK), int(WALL_THICK))
-    # 绘制内圈的安全边界（绿色实线）
+    # Draw the inner safety boundary (green solid line)
     pygame.draw.circle(surface, (0, 200, 0), (int(center.x), int(center.y)), int(inner_r), 2)
 
-    # 利用你原本的函数画所有的 smarticles
+    # Draw all smarticles using the existing draw function
     for sm in smarts:
         draw_smarticle(surface, sm)
         
-    # 保存为本地图片
+    # Save as a local image file
     pygame.image.save(surface, filepath)
 
 
@@ -72,7 +72,7 @@ def draw_smarticle(surface, sm):
 
 
 # =========================
-# 进度条
+# Progress bar
 # =========================
 def print_progress_bar(iteration, total, start_time, bar_length=30):
     percent = iteration / total
@@ -88,7 +88,7 @@ def print_progress_bar(iteration, total, start_time, bar_length=30):
 
 
 # =========================
-# 提取状态
+# Extract state
 # =========================
 def extract_smarticle_state(sm: Smarticle3Link):
     return {
@@ -108,13 +108,13 @@ def relax_system(space, steps=300, dt=1/240.0):
 
 
 # =========================
-# 主函数
+# Main function
 # =========================
 def generate_all_initial_conditions():
     all_trials = []
     start_time = time.time()
 
-    # 创建独立的图片保存文件夹
+    # Create a dedicated image output folder
     os.makedirs(IMAGE_DIR, exist_ok=True)
 
     for trial_id in range(N_TRIALS):
@@ -122,43 +122,43 @@ def generate_all_initial_conditions():
         random.seed(seed)
         np.random.seed(seed)
 
-        # ── 建 space ──────────────────────────────────────
+        # ── Build physics space ───────────────────────────
         space = pymunk.Space()
         center = pymunk.Vec2d(W / 2, H / 2)
         add_ring(space, center, INNER_R, WALL_THICK)
 
-        # ── 调用新 spawn ──────────────────────────────────
+        # ── Spawn smarticles ──────────────────────────────
         smarts = spawn_smarticles(space, center, INNER_R, N_SMARTICLES)
 
         # ==============================================================
-        # 新增：无论当前生成成功还是失败，都立马把它们的样子拍下来保存
+        # Save a snapshot image regardless of whether spawning succeeded or failed
         # ==============================================================
-        # 根据要求生成文件名：trail_0001_seed_#####.jpg (trial_id 从 0 开始，所以 +1)
+        # Generate filename: trial_XXXX.jpg (trial_id is 0-indexed)
         img_filename = f"trial_{trial_id:04d}.jpg"
         img_path = os.path.join(IMAGE_DIR, img_filename)
         save_layout_image(smarts, center, INNER_R, img_path)
 
-        # ── 放不满：记录日志并跳过 ────────────────────────────────
+        # ── Incomplete spawn: log and skip ───────────────────────────
         if len(smarts) != N_SMARTICLES:
             print(f"\n[DEBUG] Trial {trial_id + 1} failed: only placed {len(smarts)}/{N_SMARTICLES}. Image saved.")
-            # 移除已有的 smarticles 释放物理空间内存，跳过这次进入下一个 seed
+            # Remove placed smarticles to free physics memory, skip to next seed
             for sm in smarts:
                 sm.remove_from_space()
             continue
 
-        # ── Relax 后验证 (如果你以后需要可以取消注释) ──────────────
+        # ── Post-relax validation (uncomment if needed) ─────────────
         # relax_system(space, steps=300)
         # valid = all(
         #    not any_penetration(space, sm) and inside_ring(sm, center, INNER_R)
         #    for sm in smarts
         # )
         # if not valid:
-        #    print(f"\n[DEBUG] Trial {trial_id + 1}: relax 后验证失败，跳过")
+        #    print(f"\n[DEBUG] Trial {trial_id + 1}: post-relax validation failed, skipping")
         #    for sm in smarts:
         #        sm.remove_from_space()
         #    continue
 
-        # ── 保存成功的 Trial 到 JSON ────────────────────────────────
+        # ── Save successful trial to JSON ──────────────────────────
         trial_data = {
             "trial_id": trial_id,
             "seed":     seed,
@@ -170,7 +170,7 @@ def generate_all_initial_conditions():
         all_trials.append(trial_data)
         print_progress_bar(trial_id + 1, N_TRIALS, start_time)
 
-    # 写入最终合集的 JSON 文件
+    # Write all trials to the final JSON file
     with open(SAVE_PATH, "w") as f:
         json.dump(all_trials, f, indent=2)
     print(f"\n[spawn] Experiment: {_EXP_NAME}")

@@ -242,12 +242,12 @@ class Smarticle3Link:
 
         if self._warmup_step < self.warmup_steps:
             alpha = self._warmup_step / max(1, self.warmup_steps)
-            # 插值终点固定为 t=0 时的轨迹值，与实时 t 无关
+            # interpolation target fixed to trajectory value at t=0, independent of current t
             th1_target = self.A1 * math.sin(self.phase1) * -1
             th2_target = self.A2 * math.sin(self.phase2) * -1
             th1_des    = (1.0 - alpha) * self._warmup_th1_start + alpha * th1_target
             th2_des    = (1.0 - alpha) * self._warmup_th2_start + alpha * th2_target
-            dth1_des   = 0.0   # warmup 期间不施加前馈，只靠 P 控制稳定
+            dth1_des   = 0.0   # no feedforward during warmup; rely on P control only
             dth2_des   = 0.0
             self._warmup_step += 1
 

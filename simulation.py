@@ -309,12 +309,12 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
                 for agent_id, row in enumerate(frame):
                     w.writerow([step_idx, agent_id + 1,
                                 f"{row[0]:.4f}", f"{row[1]:.4f}", f"{row[2]:.4f}"])
-        # ── 计算 alignment 时间序列 ──────────────────────────────
+        # ── Compute alignment time series ───────────────────────
         try:
             align_df = process_pos_all(prefix + "_POS_ALL.csv", max_dist=150.0)
             align_df.to_csv(prefix + "_alignment.csv", index=False)
         except Exception as e:
-            print(f"[WARN] alignment 计算失败: {e}")
+            print(f"[WARN] alignment computation failed: {e}")
 
     return {"trial_id": trial_id,
             "final_rg": final_rg,
@@ -327,11 +327,11 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
 # =============================================================================
 
 def save_config_snapshot(out_dir: str):
-    """将本次实验的关键 config 参数保存为 JSON 到 out_dir 根目录。"""
+    """Save key config parameters for this experiment as JSON in the out_dir root."""
     import config as _cfg
     import json
 
-    # 只记录可序列化的标量/列表参数，跳过模块级中间变量（以 _ 开头）
+    # Only record serializable scalar/list parameters; skip module-level intermediates (prefixed with _)
     snapshot = {}
     for k, v in vars(_cfg).items():
         if k.startswith("_"):
@@ -339,7 +339,7 @@ def save_config_snapshot(out_dir: str):
         if isinstance(v, (int, float, bool, str)):
             snapshot[k] = v
         elif isinstance(v, list):
-            # INIT_PHASES 等列表，元素为 tuple/float
+            # Lists like INIT_PHASES whose elements are tuple/float
             try:
                 snapshot[k] = [list(x) if isinstance(x, tuple) else x for x in v]
             except Exception:
@@ -363,7 +363,7 @@ def main():
     INIT_FILE = os.path.join("init_conditions", EXP_NAME + ".json")
     N_TRIALS  = N_TRIALS_GLOBAL            # 0 = auto-read from init file
 
-    # ── 用 naming 生成本次实验的统一名称 ──────────────────────────────────────
+    # ── Generate unified experiment name using naming module ────────────────────
     EXP_NAME    = generate_trial_name(
         N_SMARTICLES,
         INIT_PHASES,
@@ -393,7 +393,7 @@ def main():
     os.makedirs(OUT_DIR,   exist_ok=True)
     os.makedirs(VIDEO_DIR, exist_ok=True)
 
-    # ── 保存本次实验的 config 快照 ────────────────────────────────────────────
+    # ── Save config snapshot for this experiment ─────────────────────────────
     save_config_snapshot(OUT_DIR)
 
     results    = []
