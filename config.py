@@ -19,7 +19,7 @@ MAX_RUNTIME       = 45.0    # in seconds
 RECORD_VIDEO      = True
 RECORD_POLICY     = "mod"   # "mod" | "first_n" | "both"
 RECORD_EVERY_K    = 1       # record trials where (trial_id % K == 0)
-RECORD_FIRST_N    = 3       # record the first N trials
+RECORD_FIRST_N    = 200       # record the first N trials
 VIDEO_FPS         = 30      # output video fps
 VIDEO_STRIDE      = 2       # write 1 frame every N simulation frames
 VIDEO_CODEC       = "mp4v"  # OpenCV fourcc

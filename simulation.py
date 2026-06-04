@@ -110,6 +110,12 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
 
     initial_positions = [s.main_body.position for s in smarticles]
 
+    for s in smarticles:
+        s.omega1 = OMEGA_NOM1
+        s.omega2 = OMEGA_NOM2
+        s.A1     = math.radians(A_DEG_NOM1)
+        s.A2     = math.radians(A_DEG_NOM2)
+
     # ── Per-robot warmup and phase ────────────────────────────────────────────
     for i, s in enumerate(smarticles):
         ph1, ph2       = INIT_PHASES[i]
