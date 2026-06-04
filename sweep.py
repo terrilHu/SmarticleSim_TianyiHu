@@ -93,12 +93,18 @@ def alignment_stats_from_csv(alignment_csv: str):
 # Heatmap
 # =============================================================================
 
-def plot_heatmap(heatmap_mean, heatmap_std, ampli_labels, freq_labels, out_path):
+def plot_heatmap(heatmap_mean, heatmap_std, ampli_labels, freq_labels, out_path,
+                 cmap="viridis", vmin=0, vmax=1):
     """
     Single heatmap coloured by mean alignment (last 10 s).
     Each cell is annotated with "mean\n±std".
     x-axis : amplitude (6 levels)
     y-axis : frequency (9 levels), low freq at bottom
+
+    Optional args:
+        cmap  - matplotlib colormap name (default: 'viridis')
+        vmin  - colormap lower bound (default: 0)
+        vmax  - colormap upper bound (default: 1)
     """
     n_freq, n_ampli = heatmap_mean.shape
     fig, ax = plt.subplots(figsize=(9, 6))
@@ -107,8 +113,8 @@ def plot_heatmap(heatmap_mean, heatmap_std, ampli_labels, freq_labels, out_path)
         heatmap_mean,
         origin="lower",       # freq[0]=0.5 Hz at bottom
         aspect="auto",
-        vmin=0, vmax=1,
-        cmap="viridis",
+        vmin=vmin, vmax=vmax,
+        cmap=cmap,
     )
     ax.set_xticks(range(n_ampli))
     ax.set_xticklabels(ampli_labels, rotation=30, ha="right", fontsize=9)
