@@ -12,7 +12,7 @@ import random
 
 # ── Trial / seed ──────────────────────────────────────────────────────────────
 TRIAL_SEED_BASE   = 12345
-N_TRIALS_GLOBAL   = 3       # 0 means auto-read from initial-conditions file
+N_TRIALS_GLOBAL   = 1       # 0 means auto-read from initial-conditions file
 MAX_RUNTIME       = 45.0    # in seconds
 
 # ── Video recording ───────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ WALL_ELASTICITY   = 0.0
 # ── Actuation ─────────────────────────────────────────────────────────────────
 # === THIS IS WHERE YOU CONTROL JOINT MOTION ===
 # Desired joint angle trajectory: theta(t) = A * sin(omega * t + phase)
-# Left arm  uses A1, omega1, phase1 (set per-robot in run_trial via INIT_PHASES)
+# Left arm  uses A1, omega1, phase1 (set per-robot in run_trial via COMMAND_ARRAY)
 # Right arm uses A2, omega2, phase2
 A_DEG_NOM         = 30.0    # nominal amplitude (deg) [kept for back-compat]
 A_DEG_NOM1        = 90.0    # left  arm amplitude (deg)
@@ -84,12 +84,17 @@ SPACE_DAMP        = 1.0     # velocity reserved each step
 JOINT_LIMIT_DEG   = 95.0    # hard joint angle limit (deg)
 KP_NOM            = 60.0    # proportional gain for motor PD controller
 
-# Per-robot initial phases; length must equal N_SMARTICLES.
-INIT_PHASES = [
-    #(p := random.random() * 2 * math.pi, p)
-    (math.pi*5/4, math.pi*5/4)
-    for _ in range(N_SMARTICLES)
-]
+# Per-robot command array; length must equal N_SMARTICLES.
+# Each entry is a signed 3-digit integer ±XYZ where:
+#   X (hundreds, 0-8) : initial phase  — 0 = random, 1-8 from table
+#   Y (tens,     1-6) : amplitude      — lookup table index
+#   Z (units,    1-9) : frequency      — lookup table index
+#   sign (+)          : both joints same phase
+#   sign (-)          : joints in antiphase (phase2 = phase1 + pi)
+# Example: -226 → antiphase, |phase|=pi/2, A=pi/6, f=3Hz
+#          +051 → same phase, phase=random, A=pi*5/12, f=0.5Hz
+# COMMAND_ARRAY = [566] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
+COMMAND_ARRAY = [-861] * N_SMARTICLES
 
 # ── Coupling / interaction model ──────────────────────────────────────────────
 L    = MAIN_W

@@ -8,10 +8,11 @@ import math
 import pygame
 import pymunk.pygame_util
 import os
+import math as _math
 
 from config import (INNER_R, WALL_THICK, N_SMARTICLES, TRIAL_SEED_BASE,
                     MAIN_LEN, MAIN_W, ARM_LEN, ARM_W, W, H,
-                    INIT_PHASES, OMEGA_NOM1, OMEGA_NOM2, A_DEG_NOM1, A_DEG_NOM2)
+                    COMMAND_ARRAY)
 from smarticle import Smarticle3Link, add_ring
 from spawn import (spawn_smarticles, spawn_smarticles_norelax,
                    any_penetration, inside_ring, build_from_initial_conditions)
@@ -22,12 +23,22 @@ from naming import generate_trial_name
 # =========================
 N_TRIALS = 200
 
-_EXP_NAME = generate_trial_name(
-    N_SMARTICLES,
-    INIT_PHASES,
-    omega=(OMEGA_NOM1, OMEGA_NOM2),
-    amplitude=(A_DEG_NOM1, A_DEG_NOM2),
-)
+# _cmd0  = COMMAND_ARRAY[0];  _abs0 = abs(_cmd0)
+# _z0    = _abs0 % 10;        _y0   = (_abs0 % 100 - _z0) // 10;  _x0 = _abs0 // 100
+# _PTAB  = [_math.pi/4, _math.pi/2, _math.pi*3/4, _math.pi,
+#           _math.pi*5/4, _math.pi*3/2, _math.pi*7/4, 2*_math.pi]
+# _ATAB  = [_math.pi/12, _math.pi/6, _math.pi/4, _math.pi/3, _math.pi*5/12, _math.pi/2]
+# _FTAB  = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+# _ph0   = _PTAB[_x0 - 1] if 1 <= _x0 <= 8 else 0.0
+# _om0   = (_FTAB[_z0 - 1] if 1 <= _z0 <= 9 else 0.5) * 2 * _math.pi
+# _am0   = _math.degrees(_ATAB[_y0 - 1] if 1 <= _y0 <= 6 else _math.pi/4)
+# _EXP_NAME = generate_trial_name(
+#     N_SMARTICLES,
+#     [(_ph0, _ph0)] * N_SMARTICLES,
+#     omega=(_om0, _om0),
+#     amplitude=(_am0, _am0),
+# )
+_EXP_NAME = "_200"
 SAVE_PATH = os.path.join("init_conditions", f"{_EXP_NAME}.json")
 IMAGE_DIR = os.path.join("spawn_images",    _EXP_NAME)
 

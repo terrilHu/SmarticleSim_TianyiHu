@@ -21,7 +21,7 @@ import pymunk.pygame_util
 from config import (
     # experiment
     ALREADY_SPWANED, N_SMARTICLES, TRIAL_SEED_BASE, N_TRIALS_GLOBAL,
-    INIT_PHASES, WARMUP_STEPS, RECORD_AFTER_WARMUP, MAX_RUNTIME,
+    COMMAND_ARRAY, WARMUP_STEPS, RECORD_AFTER_WARMUP, MAX_RUNTIME,
     # geometry / physics
     W, H, INNER_R, WALL_THICK, WALL_SEGMENTS, WALL_FRICTION, WALL_ELASTICITY,
     RENDER_FPS_HEADLESS, RATE_LIM, V_MAX, W_MAX, ANG_DAMP, SPACE_DAMP, LIN_DAMP,
@@ -82,13 +82,90 @@ def should_record_trial(trial_id: int) -> bool:
 # Core simulation
 # =============================================================================
 
+def _show_init_and_get_commands(smarticles, center, trial_id):
+    """
+    Display the initial layout in a pygame window and prompt the user
+    to enter a COMMAND_ARRAY via the terminal.
+    Returns the parsed list of ints, or None if the user skips.
+    """
+    # Render at half the simulation resolution
+    SCALE_WIN = 0.55
+    WIN_W = int(W * SCALE_WIN)
+    WIN_H = int(H * SCALE_WIN)
+
+    def sp(v):
+        """Scale a simulation coordinate to window coordinate."""
+        return int(v * SCALE_WIN)
+
+    os.environ.pop("SDL_VIDEODRIVER", None)
+    pygame.init()
+    screen = pygame.display.set_mode((WIN_W, WIN_H))
+    pygame.display.set_caption(
+        f"Trial {trial_id} — initial layout  (type commands in terminal then press Enter)")
+
+    screen.fill((255, 255, 255))
+    cx, cy = sp(center.x), sp(center.y)
+    pygame.draw.circle(screen, (220, 220, 220), (cx, cy),
+                       sp(INNER_R + WALL_THICK), sp(WALL_THICK))
+    pygame.draw.circle(screen, (0, 200, 0), (cx, cy), sp(INNER_R), 2)
+
+    font_label = pygame.font.Font(None, 15)
+    for idx, sm in enumerate(smarticles):
+        for body, shape, color in [
+            (sm.main_body,  sm.main_shape,  (0,   100, 255)),
+            (sm.left_body,  sm.left_shape,  (255, 100, 100)),
+            (sm.right_body, sm.right_shape, (100, 255, 100)),
+        ]:
+            verts = shape.get_vertices()
+            pts   = [(sp(p.x), sp(p.y))
+                     for p in [body.local_to_world(v) for v in verts]]
+            pygame.draw.polygon(screen, color, pts)
+        x, y = sp(sm.main_body.position.x), sp(sm.main_body.position.y)
+        screen.blit(font_label.render(str(idx), True, (0, 0, 0)), (x + 2, y + 2))
+
+    info_font = pygame.font.Font(None, 18)
+    for li, line in enumerate([
+        f"Trial {trial_id} — {len(smarticles)} robots",
+        "Enter COMMAND_ARRAY in terminal, then press Enter.",
+        "Format: 566, -226, 051, ...  (one int per robot)",
+        "Leave blank to use preset COMMAND_ARRAY.",
+    ]):
+        screen.blit(info_font.render(line, True, (30, 30, 30)), (10, 10 + li * 20))
+
+    pygame.display.flip()
+
+    # Close the window before blocking on input to avoid OS "not responding"
+    pygame.display.iconify()   # minimise first so it disappears cleanly
+    pygame.event.pump()        # flush pending events
+    pygame.quit()
+
+    print(f"\n[Trial {trial_id}] Initial layout shown. "
+          f"Enter {len(smarticles)} comma-separated commands "
+          f"(or blank to use preset):")
+    raw = input("  COMMAND_ARRAY> ").strip()
+
+    if not raw:
+        return None
+    try:
+        cmds = [int(x.strip()) for x in raw.split(",")]
+        if len(cmds) != len(smarticles):
+            print(f"[WARN] Expected {len(smarticles)} values, got {len(cmds)}. Using preset.")
+            return None
+        return cmds
+    except ValueError as e:
+        print(f"[WARN] Parse error ({e}). Using preset.")
+        return None
+
+
 def run_trial(trial_id, seed, preview, video_dir, out_dir,
-              actuations, ALL_INIT=None):
+              actuations, ALL_INIT=None, use_preset=True):
     """
     Run a single trial: physics loop, data collection, and file output.
+    When use_preset=False, displays the initial layout in a window and
+    prompts the user for a per-robot COMMAND_ARRAY before starting.
     Returns a dict with summary scalars.
     """
-    if not preview:
+    if not preview and use_preset:
         os.environ["SDL_VIDEODRIVER"] = "dummy"
     pygame.init()
 
@@ -110,17 +187,44 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
 
     initial_positions = [s.main_body.position for s in smarticles]
 
-    for s in smarticles:
-        s.omega1 = OMEGA_NOM1
-        s.omega2 = OMEGA_NOM2
-        s.A1     = math.radians(A_DEG_NOM1)
-        s.A2     = math.radians(A_DEG_NOM2)
+    # ── Interactive command input (use_preset=False) ──────────────────────────
+    active_commands = list(COMMAND_ARRAY)
+    if not use_preset:
+        user_cmds = _show_init_and_get_commands(smarticles, center, trial_id)
+        if user_cmds is not None:
+            active_commands = user_cmds
+        if not preview:
+            os.environ["SDL_VIDEODRIVER"] = "dummy"
+            pygame.init()
 
-    # ── Per-robot warmup and phase ────────────────────────────────────────────
+    # ── Decode active_commands and apply per-robot parameters ─────────────────
+    _PHASE_TABLE = [
+        math.pi/4, math.pi/2, math.pi*3/4, math.pi,
+        math.pi*5/4, math.pi*3/2, math.pi*7/4, 2*math.pi,
+    ]
+    _AMPLI_TABLE = [
+        math.pi/12, math.pi/6, math.pi/4,
+        math.pi/3,  math.pi*5/12, math.pi/2,
+    ]
+    _FREQ_TABLE  = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+
     for i, s in enumerate(smarticles):
-        ph1, ph2       = INIT_PHASES[i]
-        s.phase1       = ph1
-        s.phase2       = ph2
+        cmd      = active_commands[i]
+        sign     = -1 if cmd < 0 else 1
+        abs_cmd  = abs(cmd)
+        z        = abs_cmd % 10
+        y        = (abs_cmd % 100 - z) // 10
+        x        = abs_cmd // 100
+        freq_hz  = _FREQ_TABLE[z - 1]  if 1 <= z <= 9 else 0.5
+        ampli    = _AMPLI_TABLE[y - 1] if 1 <= y <= 6 else math.pi/4
+        ph1      = random.random() * 2 * math.pi if x == 0 else _PHASE_TABLE[x - 1]
+        ph2      = ph1 + math.pi if sign < 0 else ph1
+        s.omega1 = freq_hz * 2 * math.pi
+        s.omega2 = freq_hz * 2 * math.pi
+        s.A1     = ampli
+        s.A2     = ampli
+        s.phase1 = ph1
+        s.phase2 = ph2
         s.warmup_steps = WARMUP_STEPS
         s._warmup_step = 0
 
@@ -345,7 +449,7 @@ def save_config_snapshot(out_dir: str):
         if isinstance(v, (int, float, bool, str)):
             snapshot[k] = v
         elif isinstance(v, list):
-            # Lists like INIT_PHASES whose elements are tuple/float
+            # Lists like COMMAND_ARRAY whose elements are int
             try:
                 snapshot[k] = [list(x) if isinstance(x, tuple) else x for x in v]
             except Exception:
@@ -365,16 +469,26 @@ def save_config_snapshot(out_dir: str):
 def main():
     WORKERS   = 1                          # >1 for parallel trials
     PREVIEW   = False
-    #INIT_FILE = "init_conditions/init_conditions_200.json"
-    INIT_FILE = os.path.join("init_conditions", EXP_NAME + ".json")
+    INIT_FILE = "init_conditions/init_conditions_200.json"
+    #INIT_FILE = os.path.join("init_conditions", EXP_NAME + ".json")
     N_TRIALS  = N_TRIALS_GLOBAL            # 0 = auto-read from init file
+    USE_PRESET = False
 
     # ── Generate unified experiment name using naming module ────────────────────
+    _cmd0  = COMMAND_ARRAY[0];  _abs0 = abs(_cmd0)
+    _z0    = _abs0 % 10;        _y0   = (_abs0 % 100 - _z0) // 10;  _x0 = _abs0 // 100
+    _PTAB  = [math.pi/4, math.pi/2, math.pi*3/4, math.pi,
+              math.pi*5/4, math.pi*3/2, math.pi*7/4, 2*math.pi]
+    _ATAB  = [math.pi/12, math.pi/6, math.pi/4, math.pi/3, math.pi*5/12, math.pi/2]
+    _FTAB  = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+    _ph0   = _PTAB[_x0 - 1] if 1 <= _x0 <= 8 else 0.0
+    _om0   = (_FTAB[_z0 - 1] if 1 <= _z0 <= 9 else 0.5) * 2 * math.pi
+    _am0   = math.degrees(_ATAB[_y0 - 1] if 1 <= _y0 <= 6 else math.pi/4)
     EXP_NAME    = generate_trial_name(
         N_SMARTICLES,
-        INIT_PHASES,
-        omega=(OMEGA_NOM1, OMEGA_NOM2),
-        amplitude=(A_DEG_NOM1, A_DEG_NOM2),
+        [(_ph0, _ph0)] * N_SMARTICLES,
+        omega=(_om0, _om0),
+        amplitude=(_am0, _am0),
     )
     print(f"[main] Experiment name: {EXP_NAME}")
 
@@ -383,8 +497,8 @@ def main():
     RESULTS_CSV = os.path.join("datafile",  EXP_NAME + "_summary.csv")
 
     actuations = actuationimpactCalculation(
-        OMEGA_NOM1 / (2 * math.pi), OMEGA_NOM2 / (2 * math.pi),
-        math.radians(A_DEG_NOM1),   math.radians(A_DEG_NOM2),
+        _om0 / (2 * math.pi), _om0 / (2 * math.pi),
+        math.radians(_am0),   math.radians(_am0),
     )
 
     if ALREADY_SPWANED:
@@ -415,7 +529,7 @@ def main():
                 try:
                     res = run_trial(trial_id=tid, seed=seed, preview=PREVIEW,
                                     video_dir=VIDEO_DIR, out_dir=out_dir,
-                                    actuations=actuations, ALL_INIT=ALL_INIT)
+                                    actuations=actuations, ALL_INIT=ALL_INIT, use_preset=USE_PRESET)
                     results.append(res)
                 except Exception as e:
                     print(f"[main] Trial {tid} failed: {e}")
