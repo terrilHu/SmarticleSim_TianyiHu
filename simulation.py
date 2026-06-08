@@ -158,7 +158,8 @@ def _show_init_and_get_commands(smarticles, center, trial_id):
 
 
 def run_trial(trial_id, seed, preview, video_dir, out_dir,
-              actuations, ALL_INIT=None, use_preset=True):
+              actuations, ALL_INIT=None, use_preset=True,
+              init_idx=None):
     """
     Run a single trial: physics loop, data collection, and file output.
     When use_preset=False, displays the initial layout in a window and
@@ -181,7 +182,9 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
 
     # ── Spawn / load ──────────────────────────────────────────────────────────
     if ALREADY_SPWANED:
-        smarticles = build_from_initial_conditions(space, ALL_INIT[trial_id])
+        _idx = init_idx if init_idx is not None else trial_id
+        #smarticles = build_from_initial_conditions(space, ALL_INIT[trial_id])
+        smarticles = build_from_initial_conditions(space, ALL_INIT[_idx])
     else:
         smarticles = spawn_smarticles(space, center, INNER_R, N_SMARTICLES)
 
@@ -282,8 +285,12 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
         for _ in range(steps_per_frame):
             for s in smarticles:
                 s.step_control(t)
-                s.motor_L.rate = max(-RATE_LIM, min(RATE_LIM, s.motor_L.rate))
-                s.motor_R.rate = max(-RATE_LIM, min(RATE_LIM, s.motor_R.rate))
+                # s.motor_L.rate = max(-RATE_LIM, min(RATE_LIM, s.motor_L.rate))
+                # s.motor_R.rate = max(-RATE_LIM, min(RATE_LIM, s.motor_R.rate))
+
+                s.motor_L.rate = RATE_LIM * math.tanh(s.motor_L.rate / RATE_LIM)
+                s.motor_R.rate = RATE_LIM * math.tanh(s.motor_R.rate / RATE_LIM)
+
                 if s.main_body.velocity.length > V_MAX:
                     s.main_body.velocity = s.main_body.velocity.normalized() * V_MAX
                 if abs(s.main_body.angular_velocity) > W_MAX:
@@ -472,7 +479,7 @@ def main():
     INIT_FILE = "init_conditions/init_conditions_200.json"
     #INIT_FILE = os.path.join("init_conditions", EXP_NAME + ".json")
     N_TRIALS  = N_TRIALS_GLOBAL            # 0 = auto-read from init file
-    USE_PRESET = False
+    USE_PRESET = True
 
     # ── Generate unified experiment name using naming module ────────────────────
     _cmd0  = COMMAND_ARRAY[0];  _abs0 = abs(_cmd0)

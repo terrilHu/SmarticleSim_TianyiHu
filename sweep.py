@@ -222,13 +222,14 @@ def main():
 
                 try:
                     res = run_trial(
-                        trial_id  = 0,
+                        trial_id  = local_tid,
                         seed      = seed,
                         preview   = False,
                         video_dir = video_dir,
                         out_dir   = trial_out,
                         actuations= actuations,
                         ALL_INIT  = [ALL_INIT[global_init_idx]],
+                        init_idx  = global_init_idx,
                     )
                     res["exp_name"]   = exp_name
                     res["local_tid"]  = local_tid

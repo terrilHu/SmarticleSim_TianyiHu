@@ -69,8 +69,8 @@ A_DEG_NOM         = 30.0    # nominal amplitude (deg) [kept for back-compat]
 A_DEG_NOM1        = 90.0    # left  arm amplitude (deg)
 A_DEG_NOM2        = 90.0    # right arm amplitude (deg)
 OMEGA_NOM         = 10.0    # nominal frequency (rad/s) [kept for back-compat]
-OMEGA_NOM1        = 0.5 * 2 * math.pi   # left  arm frequency (rad/s)
-OMEGA_NOM2        = 0.5 * 2 * math.pi   # right arm frequency (rad/s)
+OMEGA_NOM1        = 3 * 2 * math.pi   # left  arm frequency (rad/s)
+OMEGA_NOM2        = 3 * 2 * math.pi   # right arm frequency (rad/s)
 # RATE_LIM          = 8.0     # motor velocity clamp (rad/s)
 # ANG_DAMP          = 0.965   # per-step angular velocity damping factor
 # SPACE_DAMP        = 0.985   # velocity reserved each step
@@ -94,7 +94,7 @@ KP_NOM            = 60.0    # proportional gain for motor PD controller
 # Example: -226 → antiphase, |phase|=pi/2, A=pi/6, f=3Hz
 #          +051 → same phase, phase=random, A=pi*5/12, f=0.5Hz
 # COMMAND_ARRAY = [566] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
-COMMAND_ARRAY = [-861] * N_SMARTICLES
+COMMAND_ARRAY = [862] * N_SMARTICLES
 
 # ── Coupling / interaction model ──────────────────────────────────────────────
 L    = MAIN_W
