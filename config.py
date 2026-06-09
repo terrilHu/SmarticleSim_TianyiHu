@@ -94,7 +94,7 @@ KP_NOM            = 60.0    # proportional gain for motor PD controller
 # Example: -226 → antiphase, |phase|=pi/2, A=pi/6, f=3Hz
 #          +051 → same phase, phase=random, A=pi*5/12, f=0.5Hz
 # COMMAND_ARRAY = [566] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
-COMMAND_ARRAY = [862] * N_SMARTICLES
+COMMAND_ARRAY = [863] * N_SMARTICLES
 
 # ── Coupling / interaction model ──────────────────────────────────────────────
 L    = MAIN_W

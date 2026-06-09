@@ -288,8 +288,8 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
                 # s.motor_L.rate = max(-RATE_LIM, min(RATE_LIM, s.motor_L.rate))
                 # s.motor_R.rate = max(-RATE_LIM, min(RATE_LIM, s.motor_R.rate))
 
-                s.motor_L.rate = RATE_LIM * math.tanh(s.motor_L.rate / RATE_LIM)
-                s.motor_R.rate = RATE_LIM * math.tanh(s.motor_R.rate / RATE_LIM)
+                s.motor_L.rate = RATE_LIM * math.tanh(1.0 * s.motor_L.rate / RATE_LIM)
+                s.motor_R.rate = RATE_LIM * math.tanh(1.0 * s.motor_R.rate / RATE_LIM)
 
                 if s.main_body.velocity.length > V_MAX:
                     s.main_body.velocity = s.main_body.velocity.normalized() * V_MAX
