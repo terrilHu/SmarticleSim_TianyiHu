@@ -108,9 +108,9 @@ SWEEP_BATCHES = [
 MIXTURE_BATCHES = [
     # Example: sweep the number of "026" robots against a background of "062" robots
     {
-        "name":     "mix_826_vs_862",
-        "cmd_a":    826,                              # command for the minority group
-        "cmd_b":    862,                              # command for the majority group
+        "name":     "mix_-041_vs_-024",
+        "cmd_a":    -41,                              # command for the minority group
+        "cmd_b":    -24,                              # command for the majority group
         "n_values": [0, 2, 4, 6, 8, 9, 11, 13, 15, 17],
         "trials":   5,
     },

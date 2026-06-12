@@ -54,7 +54,9 @@ BAR_EDGE      = "#3a1a6e"
 # Heatmap appearance
 HEATMAP_CMAP  = "plasma"
 HEATMAP_VMIN  = 0.0        # set to None for auto
-HEATMAP_VMAX  = 1.0        # set to None for auto
+HEATMAP_VMAX  = 15.0        # set to None for auto
+ALIGNMENT_VMIN = 0.5
+ALIGNMENT_VMAX = 1.0
 
 POS_ALL_NAME  = "trial_0000_POS_ALL.csv"
 OUT_SUBDIR    = "group_size_analysis"   # created under ROOT
@@ -145,11 +147,10 @@ def compute_size_distribution(groups_df: pd.DataFrame) -> pd.Series:
     """
     if groups_df.empty:
         return pd.Series(dtype=float)
-    # counts = groups_df["size"].value_counts().sort_index()
+    counts = groups_df["size"].value_counts().sort_index()
     # return counts / counts.sum()
 
-    counts = groups_df["size"].value_counts().sort_index()
-    weighted = counts * counts.index  # size × 该size的组数 = 该size贡献的机器人数
+    weighted = counts * counts.index
     return weighted / weighted.sum()
 
 
@@ -250,8 +251,10 @@ def plot_dominant_size_heatmap(records: list, out_path: str,
 
     # Colour limits based on size_mat (integer group sizes)
     valid_s = size_mat[np.isfinite(size_mat)]
-    _vmin = float(valid_s.min()) if len(valid_s) else 1
-    _vmax = float(valid_s.max()) if len(valid_s) else 1
+    # _vmin = float(valid_s.min()) if len(valid_s) else 1
+    # _vmax = float(valid_s.max()) if len(valid_s) else 1
+    _vmin = vmin if vmin is not None else (float(valid_s.min()) if len(valid_s) else 1)
+    _vmax = vmax if vmax is not None else (float(valid_s.max()) if len(valid_s) else 1)
 
     fig_w = max(6, n_a * 1.1 + 2)
     fig_h = max(4, n_f * 0.9 + 1.5)
@@ -300,6 +303,161 @@ def plot_dominant_size_heatmap(records: list, out_path: str,
 
 
 # =============================================================================
+# Axis label mappings  (slot index -> physical value)
+# =============================================================================
+
+# ampli_slot 1-6  ->  amplitude values
+AMPLI_LABELS = {
+    1: r"$\pi/12$",
+    2: r"$\pi/6$",
+    3: r"$\pi/4$",
+    4: r"$\pi/3$",
+    5: r"$5\pi/12$",
+    6: r"$\pi/2$",
+}
+
+# freq_slot 1-9  ->  frequency values (Hz)
+FREQ_LABELS = {
+    1: "0.5 Hz",
+    2: "1 Hz",
+    3: "1.5 Hz",
+    4: "2 Hz",
+    5: "2.5 Hz",
+    6: "3 Hz",
+    7: "3.5 Hz",
+    8: "4 Hz",
+    9: "4.5 Hz",
+}
+
+
+# =============================================================================
+# Alignment loading helper
+# =============================================================================
+
+def load_alignment_window(trial_dirs, last_n_frames, max_dist: float):
+    from pos_all_grouping import process_pos_all_groups
+
+    trial_means = []
+    for td in trial_dirs:
+        groups_csv = td / "grouping_groups.csv"
+        pos_csv = td / POS_ALL_NAME
+
+        if groups_csv.is_file():
+            gdf = pd.read_csv(groups_csv)
+        elif pos_csv.is_file():
+            gdf = process_pos_all_groups(str(pos_csv), max_dist,
+                                         include_singletons=True)
+        else:
+            continue
+
+        # 把 size=1 的 alignment 视为 0
+        gdf = gdf.copy()
+        gdf.loc[gdf["size"] == 1, "alignment"] = 0.0
+
+        # 手动算 size-weighted alignment per frame
+        def sw_align(sub):
+            total = sub["size"].sum()
+            return (sub["size"] * sub["alignment"]).sum() / total if total > 0 else np.nan
+
+        df = gdf.groupby("Step").apply(sw_align).reset_index()
+        df.columns = ["Step", "align_size_weighted"]
+
+        # 截取末尾窗口
+        steps = np.sort(df["Step"].unique())
+        if last_n_frames and last_n_frames < len(steps):
+            keep = set(steps[-last_n_frames:])
+            df = df[df["Step"].isin(keep)]
+
+        val = df["align_size_weighted"].dropna().to_numpy(dtype=float)
+        if len(val):
+            trial_means.append(float(np.mean(val)))
+
+    return trial_means
+
+
+# =============================================================================
+# Plot: global alignment heatmap (mean ± std across trials)
+# =============================================================================
+
+def plot_alignment_heatmap(records: list, out_path: str,
+                           last_seconds: float, max_dist: float,
+                           cmap="plasma", vmin=ALIGNMENT_VMIN, vmax=ALIGNMENT_VMAX):
+    """
+    records : list of dicts with keys
+        freq_slot, ampli_slot, align_mean, align_std, n_trials
+    Colour = align_mean; cell text = "mean\n±std".
+    Axes labelled with physical amplitude / frequency values.
+    """
+    if not records:
+        return
+
+    df = pd.DataFrame(records).dropna(subset=["freq_slot", "ampli_slot"])
+    freq_vals  = sorted(df["freq_slot"].unique())
+    ampli_vals = sorted(df["ampli_slot"].unique())
+    n_f = len(freq_vals)
+    n_a = len(ampli_vals)
+
+    mean_mat = np.full((n_f, n_a), np.nan)
+    std_mat  = np.full((n_f, n_a), np.nan)
+
+    f_idx = {v: i for i, v in enumerate(freq_vals)}
+    a_idx = {v: i for i, v in enumerate(ampli_vals)}
+
+    for r in records:
+        fi = f_idx.get(r["freq_slot"])
+        ai = a_idx.get(r["ampli_slot"])
+        if fi is None or ai is None:
+            continue
+        mean_mat[fi, ai] = r["align_mean"]
+        std_mat[fi, ai]  = r["align_std"]
+
+    valid = mean_mat[np.isfinite(mean_mat)]
+    _vmin = vmin if vmin is not None else (float(valid.min()) if len(valid) else 0)
+    _vmax = vmax if vmax is not None else (float(valid.max()) if len(valid) else 1)
+
+    fig_w = max(6, n_a * 1.2 + 2)
+    fig_h = max(4, n_f * 1.0 + 1.5)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    im = ax.imshow(mean_mat, cmap=cmap, vmin=_vmin, vmax=_vmax,
+                   aspect="auto", origin="lower")
+
+    for fi in range(n_f):
+        for ai in range(n_a):
+            m = mean_mat[fi, ai]
+            s = std_mat[fi, ai]
+            if np.isnan(m):
+                txt = "N/A"
+            else:
+                std_str = f"±{s:.3f}" if not np.isnan(s) else ""
+                txt = f"{m:.3f}\n{std_str}"
+            normed = (m - _vmin) / (_vmax - _vmin + 1e-9) if not np.isnan(m) else 0.5
+            txt_color = "white" if normed > 0.55 else "black"
+            ax.text(ai, fi, txt, ha="center", va="center",
+                    fontsize=8, color=txt_color, linespacing=1.4)
+
+    # Physical axis labels
+    ax.set_xticks(range(n_a))
+    ax.set_xticklabels([AMPLI_LABELS.get(v, str(v)) for v in ampli_vals], fontsize=9)
+    ax.set_yticks(range(n_f))
+    ax.set_yticklabels([FREQ_LABELS.get(v, str(v)) for v in freq_vals], fontsize=9)
+    ax.set_xlabel("amplitude", fontsize=10)
+    ax.set_ylabel("frequency", fontsize=10)
+    ax.set_title(
+        f"Steady-state global alignment  (size-weighted, mean ± std over trials)\n"
+        f"last {last_seconds:g}s · max_dist={max_dist:g}",
+        fontsize=10)
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.03)
+    cbar.set_label("mean alignment", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"Alignment heatmap saved -> {out_path}")
+
+
+# =============================================================================
 # Main batch
 # =============================================================================
 
@@ -323,7 +481,8 @@ def run(root: Path, scripts_dir: Path, max_dist: float,
     print(f"Settings: max_dist={max_dist}  last={last_seconds:g}s "
           f"({last_n_frames} frames)  out={out_dir}\n")
 
-    heatmap_records = []
+    heatmap_records    = []
+    alignment_records  = []
 
     for k, (meta, trial_dirs) in enumerate(combos, 1):
         freq  = meta.get("freq_slot",  "?")
@@ -340,12 +499,22 @@ def run(root: Path, scripts_dir: Path, max_dist: float,
             print(f"{tag}  SKIP (no data)")
             continue
 
-        prob = compute_size_distribution(groups_df[groups_df["size"]>1])
+        prob = compute_size_distribution(groups_df[groups_df["size"] > 1])
         mode_size = int(prob.idxmax())
         mode_prob = float(prob.max())
 
+        # Per-trial alignment means for this combo
+        trial_aligns = load_alignment_window(trial_dirs, last_n_frames, max_dist)
+        if trial_aligns:
+            align_mean = float(np.mean(trial_aligns))
+            align_std  = float(np.std(trial_aligns, ddof=1)) if len(trial_aligns) > 1 else float("nan")
+        else:
+            align_mean = float("nan")
+            align_std  = float("nan")
+
         print(f"{tag}  n_groups={len(groups_df)}  "
-              f"dominant: size={mode_size}  P={mode_prob:.3f}")
+              f"dominant: size={mode_size}  P={mode_prob:.3f}  "
+              f"alignment={align_mean:.3f}±{align_std:.3f}")
 
         # Bar chart
         bar_path = bar_dir / f"size_dist_f{freq}_a{ampli}.png"
@@ -357,18 +526,35 @@ def run(root: Path, scripts_dir: Path, max_dist: float,
             "mode_size":  mode_size,
             "mode_prob":  mode_prob,
         })
+        alignment_records.append({
+            "freq_slot":   freq,
+            "ampli_slot":  ampli,
+            "align_mean":  align_mean,
+            "align_std":   align_std,
+            "n_trials":    len(trial_aligns),
+        })
 
-    # Heatmap
+    # Dominant-size heatmap
     heatmap_path = out_dir / "dominant_size_heatmap.png"
     plot_dominant_size_heatmap(
         heatmap_records, str(heatmap_path), last_seconds, max_dist)
 
-    # Also save the heatmap data as CSV
+    # Alignment heatmap
+    alignment_heatmap_path = out_dir / "alignment_heatmap.png"
+    plot_alignment_heatmap(
+        alignment_records, str(alignment_heatmap_path), last_seconds, max_dist)
+
+    # Save tables
     if heatmap_records:
         pd.DataFrame(heatmap_records).sort_values(
             ["freq_slot", "ampli_slot"]
         ).to_csv(out_dir / "dominant_size_table.csv", index=False)
         print(f"Table  saved -> {out_dir / 'dominant_size_table.csv'}")
+    if alignment_records:
+        pd.DataFrame(alignment_records).sort_values(
+            ["freq_slot", "ampli_slot"]
+        ).to_csv(out_dir / "alignment_table.csv", index=False)
+        print(f"Table  saved -> {out_dir / 'alignment_table.csv'}")
 
 
 def main():
