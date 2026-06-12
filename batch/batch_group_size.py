@@ -55,7 +55,7 @@ BAR_EDGE      = "#3a1a6e"
 HEATMAP_CMAP  = "plasma"
 HEATMAP_VMIN  = 0.0        # set to None for auto
 HEATMAP_VMAX  = 15.0        # set to None for auto
-ALIGNMENT_VMIN = 0.5
+ALIGNMENT_VMIN = 0.3
 ALIGNMENT_VMAX = 1.0
 
 POS_ALL_NAME  = "trial_0000_POS_ALL.csv"

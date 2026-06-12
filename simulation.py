@@ -291,10 +291,17 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
                 s.motor_L.rate = RATE_LIM * math.tanh(1.0 * s.motor_L.rate / RATE_LIM)
                 s.motor_R.rate = RATE_LIM * math.tanh(1.0 * s.motor_R.rate / RATE_LIM)
 
-                if s.main_body.velocity.length > V_MAX:
-                    s.main_body.velocity = s.main_body.velocity.normalized() * V_MAX
-                if abs(s.main_body.angular_velocity) > W_MAX:
-                    s.main_body.angular_velocity = max(-W_MAX, min(W_MAX, s.main_body.angular_velocity))
+                # if s.main_body.velocity.length > V_MAX:
+                #     s.main_body.velocity = s.main_body.velocity.normalized() * V_MAX
+                # if abs(s.main_body.angular_velocity) > W_MAX:
+                #     s.main_body.angular_velocity = max(-W_MAX, min(W_MAX, s.main_body.angular_velocity))
+
+                v = s.main_body.velocity
+                speed = v.length
+                if speed > 1e-9:
+                    s.main_body.velocity = v.normalized() * (V_MAX * math.tanh(speed / V_MAX))
+
+                s.main_body.angular_velocity = W_MAX * math.tanh(s.main_body.angular_velocity / W_MAX)
 
             for s in smarticles:
                 s.main_body.velocity         *= LIN_DAMP
