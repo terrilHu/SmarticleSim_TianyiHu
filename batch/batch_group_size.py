@@ -42,7 +42,7 @@ SCRIPTS_DIR = Path(__file__).parent.parent          # default: same folder as th
 # User settings
 # =============================================================================
 
-ROOT          = r"C:/Users/tianyihu/Pictures/Camera Roll/0604_synchronized"
+ROOT          = r"C:/Users/tianyihu/Pictures/Camera Roll/0604_unsync"
 MAX_DIST      = 90.0
 FPS           = 10.0
 LAST_SECONDS  = 10.0

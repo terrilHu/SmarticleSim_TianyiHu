@@ -126,6 +126,33 @@ LAST_N_SECONDS = 10.0                               # statistics window at end o
 FRAMES_PER_SEC = RENDER_FPS_HEADLESS                # recorded frames per second
 LAST_N_FRAMES  = int(LAST_N_SECONDS * FRAMES_PER_SEC)  # number of frames in window
 
+# =============================================================================
+# Heterogeneous body settings
+# =============================================================================
+# These mirror config.py's BODY_* variables so you can override them here
+# without editing config.py.  Set SWEEP_BODY_ASSIGNMENT to None to fall back
+# to whatever config.py specifies.
+#
+# Example - 17 robots split into two body types:
+#   SWEEP_BODY_ASSIGNMENT = ["long_arm"] * 9 + ["default"] * 8
+#
+SWEEP_ENABLE_HETEROGENEOUS_BODIES = config.ENABLE_HETEROGENEOUS_BODIES
+SWEEP_BODY_TYPES                  = config.BODY_TYPES
+SWEEP_BODY_ASSIGNMENT             = None   # None = use config.BODY_ASSIGNMENT as-is
+
+
+def _patch_body_config():
+    """
+    Push the sweep-level body settings into config (and into the already-imported
+    bodies module which reads config attributes at call time).  Must be called
+    before every run_trial invocation, for the same reason COMMAND_ARRAY is
+    patched before each trial.
+    """
+    config.ENABLE_HETEROGENEOUS_BODIES = SWEEP_ENABLE_HETEROGENEOUS_BODIES
+    config.BODY_TYPES                  = SWEEP_BODY_TYPES
+    if SWEEP_BODY_ASSIGNMENT is not None:
+        config.BODY_ASSIGNMENT = SWEEP_BODY_ASSIGNMENT
+
 
 # =============================================================================
 # Helper: build COMMAND_ARRAY from slot indices
@@ -341,6 +368,7 @@ def run_batch(batch: dict, ALL_INIT: list, init_cursor_start: int,
                     N_SMARTICLES, p_slot, a_slot, f_slot, antiphase)
                 config.COMMAND_ARRAY = cmd_array
                 _sim.COMMAND_ARRAY   = cmd_array
+                _patch_body_config()
 
                 # Derive naming parameters from the command array
                 init_phases, omega, ampli = _naming_params_from_commands(cmd_array)
@@ -575,6 +603,7 @@ def run_mixture_batch(
                 N_SMARTICLES, n_a, cmd_a, cmd_b, rng)
             config.COMMAND_ARRAY = cmd_array
             _sim.COMMAND_ARRAY   = cmd_array
+            _patch_body_config()
 
             # actuation object: use cmd_a parameters (symmetric case);
             # run_trial uses per-robot omega/A from the decoded commands directly

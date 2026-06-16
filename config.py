@@ -12,7 +12,7 @@ import random
 
 # ── Trial / seed ──────────────────────────────────────────────────────────────
 TRIAL_SEED_BASE   = 12345
-N_TRIALS_GLOBAL   = 1       # 0 means auto-read from initial-conditions file
+N_TRIALS_GLOBAL   = 5       # 0 means auto-read from initial-conditions file
 MAX_RUNTIME       = 45.0    # in seconds
 
 # ── Video recording ───────────────────────────────────────────────────────────
@@ -94,7 +94,7 @@ KP_NOM            = 60.0    # proportional gain for motor PD controller
 # Example: -226 → antiphase, |phase|=pi/2, A=pi/6, f=3Hz
 #          +051 → same phase, phase=random, A=pi*5/12, f=0.5Hz
 # COMMAND_ARRAY = [566] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
-COMMAND_ARRAY = [863] * N_SMARTICLES
+COMMAND_ARRAY = [62] * N_SMARTICLES
 
 # ── Heterogeneous bodies (per-individual physical characteristics) ────────────
 # When ENABLE_HETEROGENEOUS_BODIES is False the simulation is fully homogeneous
@@ -110,20 +110,20 @@ COMMAND_ARRAY = [863] * N_SMARTICLES
 #   "mass_main", "mass_arm"   (absolute, already-scaled; optional)
 # If a mass is omitted it is auto-derived from the area ratio relative to the
 # homogeneous default, so a bigger arm is automatically heavier.
-ENABLE_HETEROGENEOUS_BODIES = False
+ENABLE_HETEROGENEOUS_BODIES = True
 
 # Library of reusable body types ("species"). "default" = the global geometry.
 BODY_TYPES = {
     "default":   {},                       # global BASE_* geometry, unchanged
     "long_arm":  {"arm_len_base": 110},    # longer arms (base 70 -> 110)
-    "short_arm": {"arm_len_base": 40},     # shorter arms (base 70 -> 40)
+    "short_arm": {"arm_len_base": 45},     # shorter arms (base 70 -> 40)
     # "heavy":   {"main_w_base": 60, "mass_main": 400.0},
 }
 
 # Per-robot assignment; length MUST equal N_SMARTICLES. Each entry is a key of
 # BODY_TYPES. Example for a 17-robot mixed population:
 #   BODY_ASSIGNMENT = (["long_arm"] * 6) + (["short_arm"] * 6) + (["default"] * 5)
-BODY_ASSIGNMENT = ["default"] * N_SMARTICLES
+BODY_ASSIGNMENT = ["default"] * 13 + ["short_arm"] * 4
 
 # ── Coupling / interaction model ──────────────────────────────────────────────
 L    = MAIN_W

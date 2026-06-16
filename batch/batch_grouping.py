@@ -50,10 +50,10 @@ from pos_all_grouping import (
 # User settings  (edit ROOT, or pass --root on the command line)
 # =============================================================================
 
-ROOT = r"C:/Users/tianyihu/Pictures/Camera Roll/0609_p_026_062"
+ROOT = r"C:/Users/tianyihu/Pictures/Camera Roll/0604_unsync"
 
 MAX_DIST           = 90.0     # Voronoi adjacency threshold (pixels)
-FPS                = 10.0     # data frame rate (Step per second)
+FPS                = 60.0     # data frame rate (Step per second)
 LAST_SECONDS       = 10.0     # trailing window for steady-state A(n)
 INCLUDE_SINGLETONS = True     # keep size-1 groups in A(n) / frame summary
 
@@ -93,8 +93,8 @@ def iter_trials(datafile_dir: Path):
             m = re.search(r"trial_(\d+)", trial_dir.name)
             if not m:
                 continue
-            yield exp_dir.name, int(m.group(1)), trial_dir, trial_dir / (trial_dir.name + POS_ALL_SUFFIX)
-            #yield exp_dir.name, int(m.group(1)), trial_dir, trial_dir / ("trial_0000" + POS_ALL_SUFFIX)
+            #yield exp_dir.name, int(m.group(1)), trial_dir, trial_dir / (trial_dir.name + POS_ALL_SUFFIX)
+            yield exp_dir.name, int(m.group(1)), trial_dir, trial_dir / ("trial_0000" + POS_ALL_SUFFIX)
 
 
 # =============================================================================
