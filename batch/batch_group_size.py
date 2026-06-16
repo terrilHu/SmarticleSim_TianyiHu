@@ -42,7 +42,7 @@ SCRIPTS_DIR = Path(__file__).parent.parent          # default: same folder as th
 # User settings
 # =============================================================================
 
-ROOT          = r"C:/Users/tianyihu/Pictures/Camera Roll/0604_unsync"
+ROOT          = r"C:/Users/tianyihu/Pictures/Camera Roll/0604_synchronized"
 MAX_DIST      = 90.0
 FPS           = 10.0
 LAST_SECONDS  = 10.0
@@ -55,7 +55,7 @@ BAR_EDGE      = "#3a1a6e"
 HEATMAP_CMAP  = "plasma"
 HEATMAP_VMIN  = 0.0        # set to None for auto
 HEATMAP_VMAX  = 15.0        # set to None for auto
-ALIGNMENT_VMIN = 0.5
+ALIGNMENT_VMIN = 0.3
 ALIGNMENT_VMAX = 1.0
 
 POS_ALL_NAME  = "trial_0000_POS_ALL.csv"

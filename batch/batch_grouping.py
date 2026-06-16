@@ -50,7 +50,7 @@ from pos_all_grouping import (
 # User settings  (edit ROOT, or pass --root on the command line)
 # =============================================================================
 
-ROOT = r"C:/Users/tianyihu/Pictures/Camera Roll/0604_synchronized"
+ROOT = r"C:/Users/tianyihu/Pictures/Camera Roll/0609_p_026_062"
 
 MAX_DIST           = 90.0     # Voronoi adjacency threshold (pixels)
 FPS                = 10.0     # data frame rate (Step per second)
@@ -62,7 +62,7 @@ RENDER_VIDEOS      = True     # render group video for trial_0002
 VIDEO_STRIDE       = 2        # video-frame -> data-step stride (as in heatmap.py)
 VIDEO_TRIAL_ID     = 2        # which trial id gets a video (2 == trial_0002)
 
-POS_ALL_NAME       = "trial_0000_POS_ALL.csv"   # filename inside each trial dir
+POS_ALL_SUFFIX     = "_POS_ALL.csv"             # appended to trial folder name to form filename
 OUT_PREFIX         = "grouping"                 # prefix for per-trial result files
 SUMMARY_NAME       = "grouping_summary.csv"     # aggregate CSV written at ROOT
 
@@ -93,7 +93,8 @@ def iter_trials(datafile_dir: Path):
             m = re.search(r"trial_(\d+)", trial_dir.name)
             if not m:
                 continue
-            yield exp_dir.name, int(m.group(1)), trial_dir, trial_dir / POS_ALL_NAME
+            yield exp_dir.name, int(m.group(1)), trial_dir, trial_dir / (trial_dir.name + POS_ALL_SUFFIX)
+            #yield exp_dir.name, int(m.group(1)), trial_dir, trial_dir / ("trial_0000" + POS_ALL_SUFFIX)
 
 
 # =============================================================================
@@ -148,7 +149,7 @@ def run_batch(root: Path):
         tag = f"[{k}/{len(trials)}] {exp_name}/trial_{trial_tid:04d}"
 
         if not pos_csv.is_file():
-            print(f"{tag}  SKIP (no {POS_ALL_NAME})")
+            print(f"{tag}  SKIP (no {pos_csv.name})")
             n_skip += 1
             continue
 

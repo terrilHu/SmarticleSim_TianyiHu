@@ -19,6 +19,7 @@ from config import (
     A_JITTER_FRAC, OMEGA_JITTER_FRAC, KP_JITTER_FRAC, TORQUE_JITTER_FRAC,
 )
 from smarticle import Smarticle3Link, rot
+from bodies import resolve_body_params, body_params_from_dict
 
 
 # =============================================================================
@@ -134,7 +135,8 @@ def sample_tight_joint_pair(lim: float, max_deg: float = 15.0):
 # =============================================================================
 
 def make_candidate(space: pymunk.Space, mode: str = "normal",
-                   phase1: float = None, phase2: float = None) -> Smarticle3Link:
+                   phase1: float = None, phase2: float = None,
+                   body_params: dict = None) -> Smarticle3Link:
     ph1 = phase1 if phase1 is not None else 0.0
     ph2 = phase2 if phase2 is not None else 0.0
 
@@ -153,11 +155,13 @@ def make_candidate(space: pymunk.Space, mode: str = "normal",
         omega1, omega2 = OMEGA_NOM1, OMEGA_NOM2
         kp, torque     = KP_NOM, MAX_MOTOR_TORQUE_NOM
 
+    geom = body_params or {}   # {} => Smarticle3Link uses global homogeneous defaults
     sm = Smarticle3Link(
         space=space, kp=kp, max_torque=torque,
         A_deg1=A_deg1, A_deg2=A_deg2,
         omega1=omega1, omega2=omega2,
         phase1=ph1,    phase2=ph2,
+        **geom,
     )
     try:
         sm.main_shape.color = (255, 0, 0, 255) if mode == "booster" else (100, 100, 255, 255)
@@ -199,7 +203,7 @@ def spawn_smarticles(space: pymunk.Space, center: pymunk.Vec2d,
         target_pos = center + pymunk.Vec2d(r * math.cos(angle), r * math.sin(angle))
         heading    = angle + math.pi / 2 + random.uniform(-0.2, 0.2)
 
-        sm     = Smarticle3Link(space)
+        sm     = Smarticle3Link(space, **resolve_body_params(i))
         offset = target_pos - sm.main_body.position
         sm.main_body.position  += offset
         sm.left_body.position  += offset
@@ -229,7 +233,7 @@ def spawn_smarticles_norelax(space: pymunk.Space, center: pymunk.Vec2d,
     spawn_max_r = inner_r * 0.82
 
     # ── Step 1: place all robots ──────────────────────────────────────────────
-    for _ in range(n):
+    for i in range(n):
         u          = random.random()
         r          = spawn_max_r * math.sqrt(u)
         angle      = random.uniform(0, 2 * math.pi)
@@ -237,7 +241,7 @@ def spawn_smarticles_norelax(space: pymunk.Space, center: pymunk.Vec2d,
         heading    = random.uniform(0, 2 * math.pi)
         fold       = (1 if random.random() < 0.5 else -1) * random.uniform(FOLD_MIN, FOLD_MAX)
 
-        sm = Smarticle3Link(space)
+        sm = Smarticle3Link(space, **resolve_body_params(i))
         sm.set_folded_pose(target_pos, heading, fold, -fold)
         for b in sm.bodies():
             space.reindex_shapes_for_body(b)
@@ -312,7 +316,7 @@ def spawn_fallback_guaranteed(space: pymunk.Space, center: pymunk.Vec2d,
         if len(smarts) >= n:
             break
         for ang in [0.0, math.pi/2, math.pi, -math.pi/2, math.pi/4, -math.pi/4]:
-            cand = make_candidate(space)
+            cand = make_candidate(space, body_params=resolve_body_params(len(smarts)))
             thL  = random.uniform(-cand.lim, cand.lim)
             thR  = random.uniform(-cand.lim, cand.lim)
             cand.set_folded_pose(pos, ang, thL, thR)
@@ -341,7 +345,7 @@ def spawn_outside_in(space: pymunk.Space, center: pymunk.Vec2d,
             pos    = center + pymunk.Vec2d(r * math.cos(angle), r * math.sin(angle))
             tang   = angle + math.pi / 2
             for off in [0, 0.2, -0.2, math.pi/4, -math.pi/4]:
-                cand = make_candidate(space)
+                cand = make_candidate(space, body_params=resolve_body_params(len(smarts)))
                 fold = (1 if random.random() < 0.5 else -1) * math.radians(80.0)
                 cand.set_folded_pose(pos, tang + off, fold, fold)
                 for body in cand.bodies():
@@ -372,7 +376,7 @@ def spawn_space_filling(space: pymunk.Space, center: pymunk.Vec2d,
 
         best_cand, best_score = None, float("inf")
         for _ in range(60):
-            cand = make_candidate(space)
+            cand = make_candidate(space, body_params=resolve_body_params(len(smarts)))
             thL  = random.uniform(-cand.lim, cand.lim)
             thR  = random.uniform(-cand.lim, cand.lim)
             cand.set_folded_pose(best_pos, random.uniform(-math.pi, math.pi), thL, thR)
@@ -410,8 +414,15 @@ def load_initial_conditions(path: str) -> list:
 
 def build_from_initial_conditions(space: pymunk.Space, trial_data: dict) -> list:
     smarts = []
-    for sm_data in trial_data["smarticles"]:
-        sm  = make_candidate(space, mode="normal")
+    for i, sm_data in enumerate(trial_data["smarticles"]):
+        # Prefer geometry persisted with the trial; otherwise resolve by index
+        # from config (BODY_ASSIGNMENT). Falls back to homogeneous if neither
+        # source defines a body, so legacy IC files keep working unchanged.
+        if "body" in sm_data:
+            geom = body_params_from_dict(sm_data["body"])
+        else:
+            geom = resolve_body_params(i)
+        sm  = make_candidate(space, mode="normal", body_params=geom)
         pos = pymunk.Vec2d(sm_data["pos"][0], sm_data["pos"][1])
         sm.set_folded_pose(pos, sm_data["angle"], sm_data["thL"], sm_data["thR"])
         smarts.append(sm)

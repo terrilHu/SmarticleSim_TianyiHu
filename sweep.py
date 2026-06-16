@@ -81,14 +81,14 @@ PHASE_TABLE = _INITIAL_DICT  # [pi/4 ... 2*pi]
 
 SWEEP_BATCHES = [
     # Example batch 1: full amplitude x frequency grid, fixed in-phase (X=8 = 2*pi)
-    # {
-    #     "name":        "full_sweep_inphase",
-    #     "phase_slots": [8],                          # X=8 -> phase = 2*pi (aligned)
-    #     "ampli_slots": [4],           # all amplitude slots
-    #     "freq_slots":  [1, 2, 3], # all frequency slots
-    #     "antiphase":   True,
-    #     "trials":      3,
-    # },
+    {
+        "name":        "full_sweep_inphase",
+        "phase_slots": [0],                          # X=8 -> phase = 2*pi (aligned)
+        "ampli_slots": [1,2,3,4,5,6],           # all amplitude slots
+        "freq_slots":  [1, 2, 3,4,5,6,7,8,9], # all frequency slots
+        "antiphase":   True,
+        "trials":      3,
+    },
 ]
 
 # =============================================================================
@@ -107,13 +107,13 @@ SWEEP_BATCHES = [
 
 MIXTURE_BATCHES = [
     # Example: sweep the number of "026" robots against a background of "062" robots
-    {
-        "name":     "mix_-041_vs_-024",
-        "cmd_a":    -41,                              # command for the minority group
-        "cmd_b":    -24,                              # command for the majority group
-        "n_values": [0, 2, 4, 6, 8, 9, 11, 13, 15, 17],
-        "trials":   5,
-    },
+    # {
+    #     "name":     "mix_-041_vs_-024",
+    #     "cmd_a":    -41,                              # command for the minority group
+    #     "cmd_b":    -24,                              # command for the majority group
+    #     "n_values": [0, 2, 4, 6, 8, 9, 11, 13, 15, 17],
+    #     "trials":   5,
+    # },
     # Add further mixture batches here
 ]
 

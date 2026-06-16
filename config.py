@@ -96,6 +96,35 @@ KP_NOM            = 60.0    # proportional gain for motor PD controller
 # COMMAND_ARRAY = [566] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
 COMMAND_ARRAY = [863] * N_SMARTICLES
 
+# ── Heterogeneous bodies (per-individual physical characteristics) ────────────
+# When ENABLE_HETEROGENEOUS_BODIES is False the simulation is fully homogeneous
+# and behaves EXACTLY as before (every robot uses the global geometry above).
+#
+# When True, every robot is assigned a "body type" by index via BODY_ASSIGNMENT.
+# A body type is a dict of OVERRIDES on the base (UNSCALED) geometry; anything not
+# listed falls back to the BASE_* defaults, and the same SCALE pipeline + clamps
+# used for the global geometry are applied automatically (see bodies.py).
+#
+# Recognised override keys:
+#   "main_len_base", "main_w_base", "arm_len_base", "arm_w_base"  (unscaled px)
+#   "mass_main", "mass_arm"   (absolute, already-scaled; optional)
+# If a mass is omitted it is auto-derived from the area ratio relative to the
+# homogeneous default, so a bigger arm is automatically heavier.
+ENABLE_HETEROGENEOUS_BODIES = False
+
+# Library of reusable body types ("species"). "default" = the global geometry.
+BODY_TYPES = {
+    "default":   {},                       # global BASE_* geometry, unchanged
+    "long_arm":  {"arm_len_base": 110},    # longer arms (base 70 -> 110)
+    "short_arm": {"arm_len_base": 40},     # shorter arms (base 70 -> 40)
+    # "heavy":   {"main_w_base": 60, "mass_main": 400.0},
+}
+
+# Per-robot assignment; length MUST equal N_SMARTICLES. Each entry is a key of
+# BODY_TYPES. Example for a 17-robot mixed population:
+#   BODY_ASSIGNMENT = (["long_arm"] * 6) + (["short_arm"] * 6) + (["default"] * 5)
+BODY_ASSIGNMENT = ["default"] * N_SMARTICLES
+
 # ── Coupling / interaction model ──────────────────────────────────────────────
 L    = MAIN_W
 S    = MAIN_LEN

@@ -107,6 +107,16 @@ def extract_smarticle_state(sm: Smarticle3Link):
         "angle": float(sm.main_body.angle),
         "thL":   float(sm.left_body.angle  - sm.main_body.angle),
         "thR":   float(sm.right_body.angle - sm.main_body.angle),
+        # Persist physical geometry so the simulation reloads the EXACT body
+        # this layout was packed with (essential for heterogeneous populations).
+        "body": {
+            "main_len":  int(sm.main_len),
+            "main_w":    int(sm.main_w),
+            "arm_len":   int(sm.arm_len),
+            "arm_w":     int(sm.arm_w),
+            "mass_main": float(sm.mass_main),
+            "mass_arm":  float(sm.mass_arm),
+        },
     }
 
 

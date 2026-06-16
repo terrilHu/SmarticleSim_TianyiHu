@@ -276,6 +276,13 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     Aij_matrix = np.zeros((n, n))
     A_wall     = np.zeros((n,), dtype=np.float32)
 
+    # ── Per-robot geometry for the (possibly heterogeneous) coupling model ────
+    # In a homogeneous run every entry equals the global L / L_s / S, so the
+    # interaction formulas below reduce EXACTLY to the original ones.
+    Ls_i   = np.array([s.L_s      for s in smarticles], dtype=float)  # half-span
+    Lw_i   = np.array([s.main_w   for s in smarticles], dtype=float)  # body width (== L)
+    Smain_i= np.array([s.main_len for s in smarticles], dtype=float)  # body length (== S)
+
     # ── Main loop ─────────────────────────────────────────────────────────────
     running = True
     while running:
@@ -318,7 +325,7 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
 
             for i in range(n):
                 dgap, r      = dist_to_inner_wall(positions[i], center, INNER_R)
-                A_wall[i], _ = wall_strength(dgap, L_s, k=K_WALL, d0=D0_WALL)
+                A_wall[i], _ = wall_strength(dgap, Ls_i[i], k=K_WALL, d0=Ls_i[i])
                 dx0 = positions[i].x - initial_positions[i].x
                 dy0 = positions[i].y - initial_positions[i].y
                 mdists.append(dx0 ** 2 + dy0 ** 2)
@@ -337,10 +344,16 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
                     dPsi_matrix[i][j] =  dPsi; dPsi_matrix[j][i] = -dPsi
                     dxy = math.sqrt(dx * dx + dy * dy)
                     dxy_matrix[i][j] = dxy_matrix[j][i] = dxy
+                    # Per-pair geometry (symmetric averages of the two bodies).
+                    # Homogeneous run -> Ls_ij=L_s, L_ij=L, R0_ij=R0 (identical
+                    # to the original constants).
+                    Ls_ij = 0.5 * (Ls_i[i]   + Ls_i[j])
+                    L_ij  = 0.5 * (Lw_i[i]    + Lw_i[j])
+                    R0_ij = Ls_ij + 0.01 * (0.5 * (Smain_i[i] + Smain_i[j]))
                     Aij_matrix[i][j] = Aij_matrix[j][i] = (
-                        L ** 2 / (dx ** 2 + dy ** 2) * (
+                        L_ij ** 2 / (dx ** 2 + dy ** 2) * (
                             (a0 + a1 * inter) * (np.sin(dPsi / 2) ** 2 + g0)
-                            + WC * sigmoid((R0 - dxy) / L_s)))
+                            + WC * sigmoid((R0_ij - dxy) / Ls_ij)))
 
             IMPACT = Aij_matrix.sum(axis=1) / (n - 1) + W_WALL * A_wall
             IMPACTS.append(IMPACT)

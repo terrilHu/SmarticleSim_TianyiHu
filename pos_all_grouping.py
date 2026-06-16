@@ -410,7 +410,8 @@ def render_group_video(exp_name: str,
     import cv2  # imported lazily, like the original
 
     trial_dir = os.path.join(base_dir, exp_name, f"trial_{trial_tid:04d}")
-    pos_csv = os.path.join(trial_dir, "trial_0000_POS_ALL.csv")
+    #pos_csv = os.path.join(trial_dir, "trial_0000_POS_ALL.csv")
+    pos_csv = os.path.join(trial_dir, f"trial_{trial_tid:04d}_POS_ALL.csv")
     if video_path is None:
         video_in = os.path.join(base_dir, "..", "videos", exp_name,
                                 f"trial_{trial_tid:04d}.mp4")

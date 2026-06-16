@@ -95,6 +95,17 @@ class Smarticle3Link:
         self.space = space
         self.kp    = float(kp)
 
+        # ── Physical geometry (per-individual; read by the coupling model
+        #    in simulation.py and persisted to the initial-conditions JSON) ────
+        self.main_len  = main_len
+        self.main_w    = main_w
+        self.arm_len   = arm_len
+        self.arm_w     = arm_w
+        self.mass_main = mass_main
+        self.mass_arm  = mass_arm
+        # Half-span used as L_s in the interaction / wall model.
+        self.L_s       = (main_len + 2.0 * arm_len) / 2.0
+
         self.A1     = math.radians(A_deg1)
         self.A2     = math.radians(A_deg2)
         self.omega1 = float(omega1)
