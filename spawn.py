@@ -201,7 +201,7 @@ def spawn_smarticles(space: pymunk.Space, center: pymunk.Vec2d,
             r     = r_inner + r_jitter
 
         target_pos = center + pymunk.Vec2d(r * math.cos(angle), r * math.sin(angle))
-        heading    = angle + math.pi / 2 + random.uniform(-0.2, 0.2)
+        heading    = angle + math.pi / 2 + random.choice([0, math.pi]) + random.uniform(-0.2, 0.2)
 
         sm     = Smarticle3Link(space, **resolve_body_params(i))
         offset = target_pos - sm.main_body.position
