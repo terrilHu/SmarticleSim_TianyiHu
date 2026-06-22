@@ -24,6 +24,7 @@ from config import (
     COMMAND_ARRAY, WARMUP_STEPS, RECORD_AFTER_WARMUP, MAX_RUNTIME,
     # geometry / physics
     W, H, INNER_R, WALL_THICK, WALL_SEGMENTS, WALL_FRICTION, WALL_ELASTICITY,
+    RING_MOVABLE, RING_SHAPE, RING_N_SIDES,
     RENDER_FPS_HEADLESS, RATE_LIM, V_MAX, W_MAX, ANG_DAMP, SPACE_DAMP, LIN_DAMP,
     # interaction model
     L, L_s, WC, R0, a0, a1, g0,
@@ -105,9 +106,17 @@ def _show_init_and_get_commands(smarticles, center, trial_id):
 
     screen.fill((255, 255, 255))
     cx, cy = sp(center.x), sp(center.y)
-    pygame.draw.circle(screen, (220, 220, 220), (cx, cy),
-                       sp(INNER_R + WALL_THICK), sp(WALL_THICK))
-    pygame.draw.circle(screen, (0, 200, 0), (cx, cy), sp(INNER_R), 2)
+    if (RING_SHAPE or "circle").lower() == "polygon":
+        _n   = max(3, int(RING_N_SIDES))
+        _pts = [(sp(center.x + INNER_R * math.cos(2 * math.pi * k / _n)),
+                 sp(center.y + INNER_R * math.sin(2 * math.pi * k / _n)))
+                for k in range(_n)]
+        pygame.draw.polygon(screen, (220, 220, 220), _pts, max(1, sp(WALL_THICK)))
+        pygame.draw.polygon(screen, (0, 200, 0), _pts, 2)
+    else:
+        pygame.draw.circle(screen, (220, 220, 220), (cx, cy),
+                           sp(INNER_R + WALL_THICK), sp(WALL_THICK))
+        pygame.draw.circle(screen, (0, 200, 0), (cx, cy), sp(INNER_R), 2)
 
     font_label = pygame.font.Font(None, 15)
     for idx, sm in enumerate(smarticles):
@@ -177,8 +186,17 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     space.collision_slop = 0.06
 
     center = pymunk.Vec2d(W / 2, H / 2)
-    add_ring(space, center, inner_r=INNER_R, wall_thick=WALL_THICK,
-             segments=WALL_SEGMENTS, friction=WALL_FRICTION, elasticity=WALL_ELASTICITY)
+    ring = add_ring(space, center, inner_r=INNER_R, wall_thick=WALL_THICK,
+                    segments=WALL_SEGMENTS, friction=WALL_FRICTION,
+                    elasticity=WALL_ELASTICITY,
+                    movable=RING_MOVABLE, shape=RING_SHAPE, n_sides=RING_N_SIDES)
+
+    # Effective interior radius used for live spawning: a polygon's edges sit
+    # inward of the circumscribed circle, so spawn within the inscribed radius
+    # (apothem) to keep robots inside the n-gon.  Circle → unchanged INNER_R.
+    eff_inner_r = INNER_R
+    if (RING_SHAPE or "circle").lower() == "polygon":
+        eff_inner_r = INNER_R * math.cos(math.pi / max(3, int(RING_N_SIDES)))
 
     # ── Spawn / load ──────────────────────────────────────────────────────────
     if ALREADY_SPWANED:
@@ -186,7 +204,7 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
         #smarticles = build_from_initial_conditions(space, ALL_INIT[trial_id])
         smarticles = build_from_initial_conditions(space, ALL_INIT[_idx])
     else:
-        smarticles = spawn_smarticles(space, center, INNER_R, N_SMARTICLES)
+        smarticles = spawn_smarticles(space, center, eff_inner_r, N_SMARTICLES)
 
     initial_positions = [s.main_body.position for s in smarticles]
 

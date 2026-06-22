@@ -13,6 +13,7 @@ from config import (
     OMEGA_NOM1, OMEGA_NOM2,
     JOINT_LIMIT_DEG,
     WALL_SEGMENTS, WALL_FRICTION, WALL_ELASTICITY,
+    RING_MASS,
 )
 
 from bodies import arm_colors
@@ -54,24 +55,220 @@ def box_body(space: pymunk.Space, pos, angle, size, mass,
 # Ring wall
 # =============================================================================
 
+class RingInfo:
+    """
+    Lightweight handle describing a ring created by :func:`add_ring`.
+
+    Returned so callers can render the boundary (whatever its shape / mobility)
+    and inspect its bodies.  Backward compatible: callers that ignore the return
+    value are completely unaffected.
+
+    Attributes
+    ----------
+    shape        : "circle" | "polygon"
+    movable      : bool
+    center       : pymunk.Vec2d   nominal centre
+    inner_r      : float          inner radius / polygon circumradius
+    wall_thick   : float
+    n_sides      : int or None    (polygon only)
+    body         : pymunk.Body or None   single rigid body of a movable circle
+    bodies       : list[pymunk.Body]     edge bodies of a polygon (else [])
+    segments     : list[pymunk.Segment]  all wall segment shapes
+    constraints  : list[pymunk.Constraint]  corner / anchor joints (polygon)
+    """
+
+    def __init__(self, shape, center, inner_r, wall_thick, movable,
+                 n_sides=None, body=None, bodies=None,
+                 segments=None, constraints=None):
+        self.shape       = shape
+        self.center      = center
+        self.inner_r     = inner_r
+        self.wall_thick  = wall_thick
+        self.movable     = movable
+        self.n_sides     = n_sides
+        self.body        = body
+        self.bodies      = bodies or []
+        self.segments    = segments or []
+        self.constraints = constraints or []
+
+    def segment_world_endpoints(self):
+        """
+        Current world-space endpoints of every wall segment, as a list of
+        (a, b) Vec2d pairs.  Works for any shape / mobility (the endpoints are
+        read live from each segment's body), so it is the safe way to draw the
+        boundary even after a movable ring has moved or a polygon has deformed.
+        """
+        out = []
+        for s in self.segments:
+            out.append((s.body.local_to_world(s.a),
+                        s.body.local_to_world(s.b)))
+        return out
+
+
 def add_ring(space: pymunk.Space, center: pymunk.Vec2d,
              inner_r: float, wall_thick: float,
              segments: int  = WALL_SEGMENTS,
              friction: float = WALL_FRICTION,
-             elasticity: float = WALL_ELASTICITY):
-    """Add a circular wall to the space made of short segment shapes."""
+             elasticity: float = WALL_ELASTICITY,
+             movable: bool = False,
+             shape: str = "circle",
+             n_sides: int = 6,
+             ring_mass: float = None) -> "RingInfo":
+    """
+    Add a confining ring wall to ``space`` and return a :class:`RingInfo` handle.
+
+    Parameters
+    ----------
+    movable : bool, default False
+        ``False`` → the ring is **fixed** (anchored to the world), exactly as in
+        the original simulation.  ``True`` → the ring is **movable**: it is built
+        from dynamic bodies and is free to translate / rotate (and, for a polygon,
+        deform) when the robots push on it.
+    shape : {"circle", "polygon"}, default "circle"
+        ``"circle"`` → a smooth circular wall of ``segments`` short arcs, identical
+        to the original ring.  ``"polygon"`` → a regular ``n_sides``-gon whose edges
+        are rigid links joined at the corners by **free-rotating pivot hinges**, so
+        the boundary can flex at every vertex.
+    n_sides : int, default 6
+        Number of sides for the polygon (clamped to >= 3).  Corner vertices lie on
+        the circle of radius ``inner_r`` (circumscribed); the edges bow inward.
+    ring_mass : float or None
+        Total mass of a movable ring, split across its segments / edge-links.
+        Ignored when ``movable`` is False.  Defaults to ``config.RING_MASS``.
+
+    Backward compatibility
+    ----------------------
+    ``add_ring(space, center, INNER_R, WALL_THICK)`` with the defaults
+    (``movable=False, shape="circle"``) reproduces the original fixed circular
+    ring exactly.
+    """
+    shape = (shape or "circle").lower()
+    if ring_mass is None:
+        ring_mass = RING_MASS
+
+    if shape == "polygon":
+        return _add_polygon_ring(space, center, inner_r, wall_thick, n_sides,
+                                 friction, elasticity, movable, ring_mass)
+    return _add_circle_ring(space, center, inner_r, wall_thick, segments,
+                            friction, elasticity, movable, ring_mass)
+
+
+def _add_circle_ring(space, center, inner_r, wall_thick, segments,
+                     friction, elasticity, movable, ring_mass):
+    """Circular wall of short arc segments — fixed (static) or movable (one rigid body)."""
     wall_r     = inner_r + wall_thick / 2.0
     seg_radius = wall_thick / 2.0
-    static     = space.static_body
+
+    if not movable:
+        # ── Original behaviour: segments welded to the world static body. ──────
+        body       = space.static_body
+        seg_shapes = []
+        for i in range(segments):
+            a0 = 2 * math.pi * i       / segments
+            a1 = 2 * math.pi * (i + 1) / segments
+            p0 = center + pymunk.Vec2d(wall_r * math.cos(a0), wall_r * math.sin(a0))
+            p1 = center + pymunk.Vec2d(wall_r * math.cos(a1), wall_r * math.sin(a1))
+            s  = pymunk.Segment(body, p0, p1, seg_radius)
+            s.friction   = friction
+            s.elasticity = elasticity
+            space.add(s)
+            seg_shapes.append(s)
+        return RingInfo("circle", center, inner_r, wall_thick, movable=False,
+                        body=None, segments=seg_shapes)
+
+    # ── Movable: a single rigid body carrying all arc segments. ────────────────
+    # Centre of mass == ring centre, so segment endpoints are given in body-local
+    # coordinates around the origin.  Thin-ring moment of inertia ≈ m * r².
+    moment        = ring_mass * wall_r * wall_r
+    body          = pymunk.Body(ring_mass, moment)
+    body.position = center
+    seg_shapes    = []
     for i in range(segments):
         a0 = 2 * math.pi * i       / segments
         a1 = 2 * math.pi * (i + 1) / segments
-        p0 = center + pymunk.Vec2d(wall_r * math.cos(a0), wall_r * math.sin(a0))
-        p1 = center + pymunk.Vec2d(wall_r * math.cos(a1), wall_r * math.sin(a1))
-        s  = pymunk.Segment(static, p0, p1, seg_radius)
+        p0 = pymunk.Vec2d(wall_r * math.cos(a0), wall_r * math.sin(a0))
+        p1 = pymunk.Vec2d(wall_r * math.cos(a1), wall_r * math.sin(a1))
+        s  = pymunk.Segment(body, p0, p1, seg_radius)
         s.friction   = friction
         s.elasticity = elasticity
-        space.add(s)
+        seg_shapes.append(s)
+    space.add(body, *seg_shapes)
+    return RingInfo("circle", center, inner_r, wall_thick, movable=True,
+                    body=body, segments=seg_shapes)
+
+
+def _add_polygon_ring(space, center, inner_r, wall_thick, n_sides,
+                      friction, elasticity, movable, ring_mass):
+    """
+    Regular n-gon wall whose corners are free-rotating hinge joints.
+
+    Each edge is its own rigid segment body.  Adjacent edges share a corner:
+
+      * movable → the two edges meeting at a corner are joined by a free-rotating
+        PivotJoint (the hinge), and nothing anchors the loop to the world, so the
+        whole polygon can translate, rotate and *flex* at every vertex.
+      * fixed   → each corner is pinned to the world at its nominal position, so
+        the n-gon keeps its shape and stays put (a static polygonal wall).
+
+    Either way the corners are realised as pivot joints, matching "a regular
+    n-gon ring with free-rotating joints at the corners".
+    """
+    n          = max(3, int(n_sides))
+    seg_radius = wall_thick / 2.0
+
+    # Corner vertices on the circumscribed circle of radius inner_r.
+    verts = [center + pymunk.Vec2d(inner_r * math.cos(2 * math.pi * k / n),
+                                   inner_r * math.sin(2 * math.pi * k / n))
+             for k in range(n)]
+
+    edge_mass   = ring_mass / n
+    edge_bodies = []
+    seg_shapes  = []
+
+    for k in range(n):
+        a   = verts[k]
+        b   = verts[(k + 1) % n]
+        mid = (a + b) * 0.5
+        d   = b - a
+        half = d.length / 2.0
+        ang  = math.atan2(d.y, d.x)
+
+        if movable:
+            moment = pymunk.moment_for_segment(edge_mass, (-half, 0), (half, 0),
+                                               seg_radius)
+            body = pymunk.Body(edge_mass, moment)
+        else:
+            body = pymunk.Body(body_type=pymunk.Body.STATIC)
+        body.position = mid
+        body.angle    = ang
+
+        # Segment runs along the body's local x-axis, centred on the midpoint, so
+        # local (-half,0) is corner k and local (+half,0) is corner k+1.
+        s = pymunk.Segment(body, (-half, 0), (half, 0), seg_radius)
+        s.friction   = friction
+        s.elasticity = elasticity
+
+        space.add(body, s)
+        edge_bodies.append(body)
+        seg_shapes.append(s)
+
+    constraints = []
+    if movable:
+        # Free-rotating hinge between the two edges that meet at each corner.
+        for k in range(n):
+            prev_edge = edge_bodies[(k - 1) % n]
+            this_edge = edge_bodies[k]
+            pivot = pymunk.PivotJoint(prev_edge, this_edge, verts[k])
+            pivot.collide_bodies = False
+            space.add(pivot)
+            constraints.append(pivot)
+    # else: the edges are STATIC bodies welded to the world at their nominal
+    # positions, so the n-gon is already fixed in place; no corner joints needed
+    # (and pymunk forbids constraints between two static bodies anyway).
+
+    return RingInfo("polygon", center, inner_r, wall_thick, movable=movable,
+                    n_sides=n, body=None, bodies=edge_bodies,
+                    segments=seg_shapes, constraints=constraints)
 
 
 # =============================================================================

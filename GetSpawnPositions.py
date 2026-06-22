@@ -12,7 +12,7 @@ import math as _math
 
 from config import (INNER_R, WALL_THICK, N_SMARTICLES, TRIAL_SEED_BASE,
                     MAIN_LEN, MAIN_W, ARM_LEN, ARM_W, W, H,
-                    COMMAND_ARRAY)
+                    COMMAND_ARRAY, RING_SHAPE, RING_N_SIDES)
 from smarticle import Smarticle3Link, add_ring
 from spawn import (spawn_smarticles, spawn_smarticles_norelax,
                    any_penetration, inside_ring, build_from_initial_conditions)
@@ -42,6 +42,12 @@ _EXP_NAME = "init_conditions_200"
 SAVE_PATH = os.path.join("init_conditions", f"{_EXP_NAME}.json")
 IMAGE_DIR = os.path.join("spawn_images",    _EXP_NAME)
 
+# When the boundary is a polygon, pack robots inside its inscribed radius
+# (apothem) so they start inside the n-gon edges; a circle keeps INNER_R.
+_IS_POLYGON = (RING_SHAPE or "circle").lower() == "polygon"
+EFF_INNER_R = (INNER_R * _math.cos(_math.pi / max(3, int(RING_N_SIDES)))
+               if _IS_POLYGON else INNER_R)
+
 
 # =========================
 # Visualization and debug saving (revised)
@@ -57,10 +63,19 @@ def save_layout_image(smarts, center, inner_r, filepath):
     surface = pygame.Surface((W, H))
     surface.fill((255, 255, 255))
     
-    # Draw the outer physical wall boundary (light gray)
-    pygame.draw.circle(surface, (220, 220, 220), (int(center.x), int(center.y)), int(inner_r + WALL_THICK), int(WALL_THICK))
-    # Draw the inner safety boundary (green solid line)
-    pygame.draw.circle(surface, (0, 200, 0), (int(center.x), int(center.y)), int(inner_r), 2)
+    # Draw the boundary: a polygon outline when configured, else the circle.
+    if _IS_POLYGON:
+        n   = max(3, int(RING_N_SIDES))
+        pts = [(int(center.x + inner_r * _math.cos(2 * _math.pi * k / n)),
+                int(center.y + inner_r * _math.sin(2 * _math.pi * k / n)))
+               for k in range(n)]
+        pygame.draw.polygon(surface, (220, 220, 220), pts, int(WALL_THICK))
+        pygame.draw.polygon(surface, (0, 200, 0), pts, 2)
+    else:
+        # Draw the outer physical wall boundary (light gray)
+        pygame.draw.circle(surface, (220, 220, 220), (int(center.x), int(center.y)), int(inner_r + WALL_THICK), int(WALL_THICK))
+        # Draw the inner safety boundary (green solid line)
+        pygame.draw.circle(surface, (0, 200, 0), (int(center.x), int(center.y)), int(inner_r), 2)
 
     # Draw all smarticles using the existing draw function
     for sm in smarts:
@@ -146,10 +161,14 @@ def generate_all_initial_conditions():
         # ── Build physics space ───────────────────────────
         space = pymunk.Space()
         center = pymunk.Vec2d(W / 2, H / 2)
-        add_ring(space, center, INNER_R, WALL_THICK)
+        # Use the configured ring SHAPE, but keep it fixed during packing so the
+        # wall does not drift while robots settle (mobility only matters at run
+        # time, in simulation.py).
+        add_ring(space, center, INNER_R, WALL_THICK,
+                 movable=False, shape=RING_SHAPE, n_sides=RING_N_SIDES)
 
         # ── Spawn smarticles ──────────────────────────────
-        smarts = spawn_smarticles(space, center, INNER_R, N_SMARTICLES)
+        smarts = spawn_smarticles(space, center, EFF_INNER_R, N_SMARTICLES)
 
         # ==============================================================
         # Save a snapshot image regardless of whether spawning succeeded or failed

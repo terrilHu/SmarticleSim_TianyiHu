@@ -60,6 +60,26 @@ ARM_LEN,  ARM_W   = max(18, int(BASE_ARM_LEN  * SCALE)), max(3,  int(BASE_ARM_W 
 WALL_FRICTION     = 0.9
 WALL_ELASTICITY   = 0.0
 
+# ── Ring (confining boundary) options ─────────────────────────────────────────
+# The boundary can be FIXED (anchored to the world) or MOVABLE (free to move),
+# and a smooth CIRCLE or a regular N-gon whose corners are free-rotating hinges.
+#
+#   RING_MOVABLE = False, RING_SHAPE = "circle"  →  the original fixed circular
+#   ring, reproduced exactly.  Any other combination is a new variant.
+#
+# Combinations:
+#   circle  + fixed    : original smooth static wall.
+#   circle  + movable  : one rigid ring body, free to translate & rotate.
+#   polygon + fixed    : regular n-gon wall held in place at its corners.
+#   polygon + movable  : n rigid edge-links joined by free-rotating corner
+#                        hinge joints — a deformable loop the swarm can reshape.
+RING_MOVABLE   = False        # False = fixed (default); True = movable
+RING_SHAPE     = "circle"     # "circle" (default) | "polygon"
+RING_N_SIDES   = 6            # number of sides when RING_SHAPE == "polygon" (>= 3)
+# Total mass of a MOVABLE ring, distributed over its segments / edge-links.
+# Ignored when RING_MOVABLE is False.  Heavier = harder for the swarm to shove.
+RING_MASS      = 5000.0 * (SCALE ** 2)
+
 # ── Actuation ─────────────────────────────────────────────────────────────────
 # === THIS IS WHERE YOU CONTROL JOINT MOTION ===
 # Desired joint angle trajectory: theta(t) = A * sin(omega * t + phase)
