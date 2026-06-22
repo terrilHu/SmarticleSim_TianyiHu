@@ -94,7 +94,8 @@ KP_NOM            = 60.0    # proportional gain for motor PD controller
 # Example: -226 → antiphase, |phase|=pi/2, A=pi/6, f=3Hz
 #          +051 → same phase, phase=random, A=pi*5/12, f=0.5Hz
 # COMMAND_ARRAY = [566] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
-COMMAND_ARRAY = [62] * N_SMARTICLES
+COMMAND_ARRAY = [842] * 9 + [-842] * 8
+random.shuffle(COMMAND_ARRAY)
 
 # ── Heterogeneous bodies (per-individual physical characteristics) ────────────
 # When ENABLE_HETEROGENEOUS_BODIES is False the simulation is fully homogeneous
@@ -123,7 +124,8 @@ BODY_TYPES = {
 # Per-robot assignment; length MUST equal N_SMARTICLES. Each entry is a key of
 # BODY_TYPES. Example for a 17-robot mixed population:
 #   BODY_ASSIGNMENT = (["long_arm"] * 6) + (["short_arm"] * 6) + (["default"] * 5)
-BODY_ASSIGNMENT = ["default"] * 13 + ["short_arm"] * 4
+BODY_ASSIGNMENT = ["default"] * 17
+random.shuffle(BODY_ASSIGNMENT)
 
 # ── Coupling / interaction model ──────────────────────────────────────────────
 L    = MAIN_W

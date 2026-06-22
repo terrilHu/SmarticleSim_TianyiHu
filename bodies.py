@@ -113,3 +113,11 @@ def body_params_from_dict(d: dict) -> dict:
         "mass_main": float(d.get("mass_main", cfg.MASS_MAIN)),
         "mass_arm":  float(d.get("mass_arm",  cfg.MASS_ARM)),
     }
+
+def arm_colors(sm):
+    if sm.arm_len >= 100:        # long_arm
+        return (255, 140, 0, 255), (255, 200, 100, 255)   # 橙系
+    elif sm.arm_len <= 50:       # short_arm
+        return (100, 200, 100, 255), (180, 230, 180, 255)  # 绿系
+    else:                        # default
+        return (255, 100, 100, 255), (100, 100, 255, 255)  # 原红/蓝

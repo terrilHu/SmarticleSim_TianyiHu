@@ -15,6 +15,7 @@ from config import (
     WALL_SEGMENTS, WALL_FRICTION, WALL_ELASTICITY,
 )
 
+from bodies import arm_colors
 
 # =============================================================================
 # Math helpers
@@ -126,9 +127,14 @@ class Smarticle3Link:
             space, pos=(0, 0), angle=0.0, size=(arm_len, arm_w),
             mass=mass_arm, friction=0.0, elasticity=0.0)
 
+        # try:
+        #     self.left_shape.color  = (255, 100, 100, 255)  # left arm: red
+        #     self.right_shape.color = (100, 100, 255, 255)  # right arm: blue
+        # except Exception:
+        #     pass
+
         try:
-            self.left_shape.color  = (255, 100, 100, 255)  # left arm: red
-            self.right_shape.color = (100, 100, 255, 255)  # right arm: blue
+            self.left_shape.color, self.right_shape.color = arm_colors(self)
         except Exception:
             pass
 
