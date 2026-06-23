@@ -50,51 +50,25 @@ EFF_INNER_R = (INNER_R * _math.cos(_math.pi / max(3, int(RING_N_SIDES)))
 
 
 # =========================
-# Visualization and debug saving (revised)
+# Visualization and debug saving
 # =========================
-def save_layout_image(smarts, center, inner_r, filepath):
+def save_layout_image(space, filepath):
     """
-    Offline rendering without popup: draw robot positions onto an in-memory Surface and save as jpg
+    Render the current pymunk space (ring wall + all smarticles) to an
+    in-memory Surface via debug_draw and save as an image file.
+
+    Using space.debug_draw means the boundary is drawn from the actual
+    Segment shapes in the space, so it is always correct regardless of
+    whether the ring is a circle or a polygon.
     """
     if not pygame.get_init():
         pygame.init()
-        
-    # Create a pure in-memory Surface without calling set_mode to avoid popup windows
+
     surface = pygame.Surface((W, H))
     surface.fill((255, 255, 255))
-    
-    # Draw the boundary: a polygon outline when configured, else the circle.
-    if _IS_POLYGON:
-        n   = max(3, int(RING_N_SIDES))
-        pts = [(int(center.x + inner_r * _math.cos(2 * _math.pi * k / n)),
-                int(center.y + inner_r * _math.sin(2 * _math.pi * k / n)))
-               for k in range(n)]
-        pygame.draw.polygon(surface, (220, 220, 220), pts, int(WALL_THICK))
-        pygame.draw.polygon(surface, (0, 200, 0), pts, 2)
-    else:
-        # Draw the outer physical wall boundary (light gray)
-        pygame.draw.circle(surface, (220, 220, 220), (int(center.x), int(center.y)), int(inner_r + WALL_THICK), int(WALL_THICK))
-        # Draw the inner safety boundary (green solid line)
-        pygame.draw.circle(surface, (0, 200, 0), (int(center.x), int(center.y)), int(inner_r), 2)
-
-    # Draw all smarticles using the existing draw function
-    for sm in smarts:
-        draw_smarticle(surface, sm)
-        
-    # Save as a local image file
+    draw_options = pymunk.pygame_util.DrawOptions(surface)
+    space.debug_draw(draw_options)
     pygame.image.save(surface, filepath)
-
-
-def draw_smarticle(surface, sm):
-    def draw_poly(body, shape, color):
-        verts = shape.get_vertices()
-        pts = [body.local_to_world(v) for v in verts]
-        pts = [(int(p.x), int(p.y)) for p in pts]
-        pygame.draw.polygon(surface, color, pts)
-
-    draw_poly(sm.main_body, sm.main_shape, (0, 100, 255))
-    draw_poly(sm.left_body,  sm.left_shape,  (255, 100, 100))
-    draw_poly(sm.right_body, sm.right_shape, (100, 255, 100))
 
 
 # =========================
@@ -176,7 +150,7 @@ def generate_all_initial_conditions():
         # Generate filename: trial_XXXX.jpg (trial_id is 0-indexed)
         img_filename = f"trial_{trial_id:04d}.jpg"
         img_path = os.path.join(IMAGE_DIR, img_filename)
-        save_layout_image(smarts, center, INNER_R, img_path)
+        save_layout_image(space, img_path)
 
         # ── Incomplete spawn: log and skip ───────────────────────────
         if len(smarts) != N_SMARTICLES:

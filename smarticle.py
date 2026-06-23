@@ -13,7 +13,7 @@ from config import (
     OMEGA_NOM1, OMEGA_NOM2,
     JOINT_LIMIT_DEG,
     WALL_SEGMENTS, WALL_FRICTION, WALL_ELASTICITY,
-    RING_MASS,
+    RING_MASS, RING_COLOR_BANDS,
 )
 
 from bodies import arm_colors
@@ -105,6 +105,51 @@ class RingInfo:
         return out
 
 
+# =============================================================================
+# Ring color-band palette
+# =============================================================================
+
+# High-contrast RGBA palette for ring color bands.  Chosen to be visually
+# distinct even when only 2 or 4 bands are used, and to stand out against
+# the white background and the blue/gray pymunk default robot colors.
+_BAND_PALETTE = [
+    (220,  50,  50, 255),   # red
+    (230, 140,  20, 255),   # orange
+    ( 50, 180,  50, 255),   # green
+    ( 30, 120, 220, 255),   # blue
+    (160,  40, 200, 255),   # purple
+    ( 20, 190, 190, 255),   # teal
+    (230, 210,  20, 255),   # yellow
+    (220,  80, 160, 255),   # pink
+]
+
+
+def _color_ring_segments(segments, n_bands, angle_fn):
+    """
+    Assign ``shape.color`` to each segment in ``segments`` based on its
+    angular position in the ring.
+
+    Parameters
+    ----------
+    segments  : list of pymunk.Segment
+    n_bands   : int — number of color bands (must be >= 1)
+    angle_fn  : callable(seg) -> float
+        Returns the representative angle (radians) of a segment in the ring.
+        The value only needs to be consistent within [0, 2π); wrapping is
+        handled here.
+    """
+    if not n_bands:
+        return
+    import pygame
+    palette = _BAND_PALETTE
+    two_pi  = 2.0 * math.pi
+    for s in segments:
+        ang      = angle_fn(s) % two_pi          # normalise to [0, 2π)
+        band_idx = int(ang / two_pi * n_bands) % n_bands
+        r, g, b, a = palette[band_idx % len(palette)]
+        s.color  = pygame.Color(r, g, b, a)
+
+
 def add_ring(space: pymunk.Space, center: pymunk.Vec2d,
              inner_r: float, wall_thick: float,
              segments: int  = WALL_SEGMENTS,
@@ -113,48 +158,54 @@ def add_ring(space: pymunk.Space, center: pymunk.Vec2d,
              movable: bool = False,
              shape: str = "circle",
              n_sides: int = 6,
-             ring_mass: float = None) -> "RingInfo":
+             ring_mass: float = None,
+             color_bands: int = None) -> "RingInfo":
     """
     Add a confining ring wall to ``space`` and return a :class:`RingInfo` handle.
 
     Parameters
     ----------
     movable : bool, default False
-        ``False`` → the ring is **fixed** (anchored to the world), exactly as in
-        the original simulation.  ``True`` → the ring is **movable**: it is built
-        from dynamic bodies and is free to translate / rotate (and, for a polygon,
-        deform) when the robots push on it.
+        ``False`` → fixed (anchored to the world).  ``True`` → movable (the ring
+        body/bodies are dynamic and can translate / rotate, and for a polygon,
+        deform) when pushed by robots.
     shape : {"circle", "polygon"}, default "circle"
-        ``"circle"`` → a smooth circular wall of ``segments`` short arcs, identical
-        to the original ring.  ``"polygon"`` → a regular ``n_sides``-gon whose edges
-        are rigid links joined at the corners by **free-rotating pivot hinges**, so
-        the boundary can flex at every vertex.
+        ``"circle"`` → smooth circular wall of ``segments`` short arcs.
+        ``"polygon"`` → regular ``n_sides``-gon with free-rotating corner hinges.
     n_sides : int, default 6
-        Number of sides for the polygon (clamped to >= 3).  Corner vertices lie on
-        the circle of radius ``inner_r`` (circumscribed); the edges bow inward.
+        Number of sides for the polygon (clamped to >= 3).
     ring_mass : float or None
-        Total mass of a movable ring, split across its segments / edge-links.
-        Ignored when ``movable`` is False.  Defaults to ``config.RING_MASS``.
+        Total mass of a movable ring.  Ignored when ``movable`` is False.
+        Defaults to ``config.RING_MASS``.
+    color_bands : int or None
+        Number of color bands painted around the ring so that rotation and
+        translation are visible at a glance.  ``None`` or ``0`` → no special
+        coloring (pymunk default).  A positive integer N divides the ring into N
+        equal angular bands, each painted a distinct high-contrast color cycling
+        through a fixed palette.  Defaults to ``config.RING_COLOR_BANDS``.
 
     Backward compatibility
     ----------------------
     ``add_ring(space, center, INNER_R, WALL_THICK)`` with the defaults
-    (``movable=False, shape="circle"``) reproduces the original fixed circular
-    ring exactly.
+    reproduces the original fixed circular ring exactly.
     """
     shape = (shape or "circle").lower()
     if ring_mass is None:
         ring_mass = RING_MASS
+    if color_bands is None:
+        color_bands = RING_COLOR_BANDS or 0
 
     if shape == "polygon":
         return _add_polygon_ring(space, center, inner_r, wall_thick, n_sides,
-                                 friction, elasticity, movable, ring_mass)
+                                 friction, elasticity, movable, ring_mass,
+                                 color_bands)
     return _add_circle_ring(space, center, inner_r, wall_thick, segments,
-                            friction, elasticity, movable, ring_mass)
+                            friction, elasticity, movable, ring_mass,
+                            color_bands)
 
 
 def _add_circle_ring(space, center, inner_r, wall_thick, segments,
-                     friction, elasticity, movable, ring_mass):
+                     friction, elasticity, movable, ring_mass, color_bands):
     """Circular wall of short arc segments — fixed (static) or movable (one rigid body)."""
     wall_r     = inner_r + wall_thick / 2.0
     seg_radius = wall_thick / 2.0
@@ -173,12 +224,16 @@ def _add_circle_ring(space, center, inner_r, wall_thick, segments,
             s.elasticity = elasticity
             space.add(s)
             seg_shapes.append(s)
+        # For a fixed circle the segment endpoints are world-absolute coords
+        # (p0 = center + offset), so subtract center before atan2.
+        _color_ring_segments(seg_shapes, color_bands,
+            lambda s, cx=center.x, cy=center.y: math.atan2(
+                (s.a.y + s.b.y) / 2.0 - cy,
+                (s.a.x + s.b.x) / 2.0 - cx))
         return RingInfo("circle", center, inner_r, wall_thick, movable=False,
                         body=None, segments=seg_shapes)
 
     # ── Movable: a single rigid body carrying all arc segments. ────────────────
-    # Centre of mass == ring centre, so segment endpoints are given in body-local
-    # coordinates around the origin.  Thin-ring moment of inertia ≈ m * r².
     moment        = ring_mass * wall_r * wall_r
     body          = pymunk.Body(ring_mass, moment)
     body.position = center
@@ -193,12 +248,20 @@ def _add_circle_ring(space, center, inner_r, wall_thick, segments,
         s.elasticity = elasticity
         seg_shapes.append(s)
     space.add(body, *seg_shapes)
+    # For a movable circle the segment coords are body-local; the body starts at
+    # angle 0, so local coords equal world coords at t=0. The body angle
+    # (body.angle) changes at runtime, but color.is fixed at creation time —
+    # the color paint rotates with the body automatically.
+    _color_ring_segments(seg_shapes, color_bands,
+        lambda s: math.atan2(
+            (s.a.y + s.b.y) / 2.0,
+            (s.a.x + s.b.x) / 2.0))
     return RingInfo("circle", center, inner_r, wall_thick, movable=True,
                     body=body, segments=seg_shapes)
 
 
 def _add_polygon_ring(space, center, inner_r, wall_thick, n_sides,
-                      friction, elasticity, movable, ring_mass):
+                      friction, elasticity, movable, ring_mass, color_bands):
     """
     Regular n-gon wall whose corners are free-rotating hinge joints.
 
@@ -265,6 +328,15 @@ def _add_polygon_ring(space, center, inner_r, wall_thick, n_sides,
     # else: the edges are STATIC bodies welded to the world at their nominal
     # positions, so the n-gon is already fixed in place; no corner joints needed
     # (and pymunk forbids constraints between two static bodies anyway).
+
+    # Color bands: pre-compute the representative angle (world midpoint of each
+    # edge relative to ring center) so the lambda is a simple dict lookup.
+    _seg_angle = {}
+    for k, s in enumerate(seg_shapes):
+        mid   = (verts[k] + verts[(k + 1) % n]) * 0.5
+        _seg_angle[id(s)] = math.atan2(mid.y - center.y, mid.x - center.x)
+    _color_ring_segments(seg_shapes, color_bands,
+                         lambda s: _seg_angle[id(s)])
 
     return RingInfo("polygon", center, inner_r, wall_thick, movable=movable,
                     n_sides=n, body=None, bodies=edge_bodies,

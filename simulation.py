@@ -24,7 +24,7 @@ from config import (
     COMMAND_ARRAY, WARMUP_STEPS, RECORD_AFTER_WARMUP, MAX_RUNTIME,
     # geometry / physics
     W, H, INNER_R, WALL_THICK, WALL_SEGMENTS, WALL_FRICTION, WALL_ELASTICITY,
-    RING_MOVABLE, RING_SHAPE, RING_N_SIDES,
+    RING_MOVABLE, RING_SHAPE, RING_N_SIDES, RING_COLOR_BANDS,
     RENDER_FPS_HEADLESS, RATE_LIM, V_MAX, W_MAX, ANG_DAMP, SPACE_DAMP, LIN_DAMP,
     # interaction model
     L, L_s, WC, R0, a0, a1, g0,
@@ -189,7 +189,8 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     ring = add_ring(space, center, inner_r=INNER_R, wall_thick=WALL_THICK,
                     segments=WALL_SEGMENTS, friction=WALL_FRICTION,
                     elasticity=WALL_ELASTICITY,
-                    movable=RING_MOVABLE, shape=RING_SHAPE, n_sides=RING_N_SIDES)
+                    movable=RING_MOVABLE, shape=RING_SHAPE, n_sides=RING_N_SIDES,
+                    color_bands=RING_COLOR_BANDS)
 
     # Effective interior radius used for live spawning: a polygon's edges sit
     # inward of the circumscribed circle, so spawn within the inscribed radius

@@ -12,7 +12,7 @@ import random
 
 # ── Trial / seed ──────────────────────────────────────────────────────────────
 TRIAL_SEED_BASE   = 12345
-N_TRIALS_GLOBAL   = 5       # 0 means auto-read from initial-conditions file
+N_TRIALS_GLOBAL   = 1       # 0 means auto-read from initial-conditions file
 MAX_RUNTIME       = 45.0    # in seconds
 
 # ── Video recording ───────────────────────────────────────────────────────────
@@ -73,12 +73,19 @@ WALL_ELASTICITY   = 0.0
 #   polygon + fixed    : regular n-gon wall held in place at its corners.
 #   polygon + movable  : n rigid edge-links joined by free-rotating corner
 #                        hinge joints — a deformable loop the swarm can reshape.
-RING_MOVABLE   = False        # False = fixed (default); True = movable
-RING_SHAPE     = "circle"     # "circle" (default) | "polygon"
-RING_N_SIDES   = 6            # number of sides when RING_SHAPE == "polygon" (>= 3)
+RING_MOVABLE   = True        # False = fixed (default); True = movable
+RING_SHAPE     = "polygon"     # "circle" (default) | "polygon"
+RING_N_SIDES   = 35            # number of sides when RING_SHAPE == "polygon" (>= 3)
 # Total mass of a MOVABLE ring, distributed over its segments / edge-links.
 # Ignored when RING_MOVABLE is False.  Heavier = harder for the swarm to shove.
-RING_MASS      = 5000.0 * (SCALE ** 2)
+RING_MASS      = 1000.0 * (SCALE ** 2)
+# Number of color bands painted around the ring, for observing rotation/translation.
+# None or 0  →  no special coloring (pymunk default gray/blue).
+# Positive N  →  divide the ring into N equal angular bands, each a distinct
+#                high-contrast color, cycling through a fixed palette.
+# Good values: 2 (half-and-half), 4 (quadrants), 6, 8.
+# Works with all shape / movable combinations.
+RING_COLOR_BANDS = 4
 
 # ── Actuation ─────────────────────────────────────────────────────────────────
 # === THIS IS WHERE YOU CONTROL JOINT MOTION ===
@@ -113,8 +120,8 @@ KP_NOM            = 60.0    # proportional gain for motor PD controller
 #   sign (-)          : joints in antiphase (phase2 = phase1 + pi)
 # Example: -226 → antiphase, |phase|=pi/2, A=pi/6, f=3Hz
 #          +051 → same phase, phase=random, A=pi*5/12, f=0.5Hz
-# COMMAND_ARRAY = [566] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
-COMMAND_ARRAY = [842] * 9 + [-842] * 8
+COMMAND_ARRAY = [862] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
+#COMMAND_ARRAY = [842] * 9 + [-842] * 8
 random.shuffle(COMMAND_ARRAY)
 
 # ── Heterogeneous bodies (per-individual physical characteristics) ────────────
