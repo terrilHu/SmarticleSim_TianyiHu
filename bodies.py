@@ -37,6 +37,20 @@ _DEFAULT_BASE = {
 _GEOM_KEYS = set(_DEFAULT_BASE.keys())
 _MASS_KEYS = {"mass_main", "mass_arm"}
 
+def gait_for_smarticle(sm) -> int:
+    """根据机器人的实际几何属性返回对应的 COMMAND int。"""
+    if not getattr(cfg, "ENABLE_HETEROGENEOUS_BODIES", False):
+        return None  # 让调用方用 COMMAND_ARRAY[i]
+
+    arm_len = sm.arm_len  # 从实例读，和 IC 文件加载还是新 spawn 无关
+
+    # 和 BODY_TYPES 里的阈值对应，而不是查 BODY_ASSIGNMENT
+    if arm_len >= _scaled_len(cfg.BASE_ARM_LEN) * 1.3:   # long_arm
+        return cfg.GAIT_BY_TYPE.get("long_arm", None)
+    elif arm_len <= _scaled_len(cfg.BASE_ARM_LEN) * 0.75: # short_arm
+        return cfg.GAIT_BY_TYPE.get("short_arm", None)
+    else:
+        return cfg.GAIT_BY_TYPE.get("default", None)
 
 def _body_type_for(i: int) -> dict:
     """Return the raw override dict assigned to robot index i (validated)."""

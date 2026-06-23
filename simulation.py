@@ -21,11 +21,11 @@ import pymunk.pygame_util
 from config import (
     # experiment
     ALREADY_SPWANED, N_SMARTICLES, TRIAL_SEED_BASE, N_TRIALS_GLOBAL,
-    COMMAND_ARRAY, WARMUP_STEPS, RECORD_AFTER_WARMUP, MAX_RUNTIME,
+    COMMAND_ARRAY, WARMUP_STEPS, RECORD_AFTER_WARMUP, MAX_RUNTIME, INIT_SELECTION,
     # geometry / physics
     W, H, INNER_R, WALL_THICK, WALL_SEGMENTS, WALL_FRICTION, WALL_ELASTICITY,
     RING_MOVABLE, RING_SHAPE, RING_N_SIDES, RING_COLOR_BANDS,
-    RENDER_FPS_HEADLESS, RATE_LIM, V_MAX, W_MAX, ANG_DAMP, SPACE_DAMP, LIN_DAMP,
+    RENDER_FPS_HEADLESS, RATE_LIM, V_MAX, W_MAX, ANG_DAMP, SPACE_DAMP, LIN_DAMP, ENABLE_HETEROGENEOUS_BODIES,
     # interaction model
     L, L_s, WC, R0, a0, a1, g0,
     # recording
@@ -48,6 +48,8 @@ from analysis import (
 from pos_all_alignment import process_pos_all
 
 from naming import generate_trial_name
+
+from bodies import gait_for_smarticle
 
 # =============================================================================
 # Utilities
@@ -231,7 +233,9 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     _FREQ_TABLE  = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
 
     for i, s in enumerate(smarticles):
-        cmd      = active_commands[i]
+        #cmd      = active_commands[i]
+        override = gait_for_smarticle(s)
+        cmd = override if override is not None else active_commands[i]
         sign     = -1 if cmd < 0 else 1
         abs_cmd  = abs(cmd)
         z        = abs_cmd % 10
@@ -508,7 +512,7 @@ def save_config_snapshot(out_dir: str):
 def main():
     WORKERS   = 1                          # >1 for parallel trials
     PREVIEW   = False
-    INIT_FILE = "init_conditions/init_conditions_200.json"
+    INIT_FILE = "init_conditions/init_conditions_200_H.json"
     #INIT_FILE = os.path.join("init_conditions", EXP_NAME + ".json")
     N_TRIALS  = N_TRIALS_GLOBAL            # 0 = auto-read from init file
     USE_PRESET = True
@@ -544,10 +548,25 @@ def main():
         ALL_INIT = load_initial_conditions(INIT_FILE)
         if not N_TRIALS:
             N_TRIALS = len(ALL_INIT)
-        print(f"[main] Loaded {N_TRIALS} initial conditions from '{INIT_FILE}'.")
+        print(f"[main] Loaded {len(ALL_INIT)} initial conditions from '{INIT_FILE}'.")
+
+        # Build per-trial IC index list according to INIT_SELECTION.
+        pool = list(range(len(ALL_INIT)))
+        if (INIT_SELECTION or 'sequential').lower().startswith('rand'):
+            idx_seq, shuffled = [], []
+            for _ in range(N_TRIALS):
+                if not shuffled:
+                    shuffled = pool[:]
+                    random.shuffle(shuffled)
+                idx_seq.append(shuffled.pop())
+            print(f'[main] IC selection: RANDOM (without replacement, reshuffles as needed)')
+        else:
+            idx_seq = [i % len(pool) for i in range(N_TRIALS)]
+            print(f'[main] IC selection: SEQUENTIAL')
     else:
         ALL_INIT = None
-        N_TRIALS = N_TRIALS or 1
+        idx_seq  = [None] * (N_TRIALS or 1)
+        N_TRIALS = len(idx_seq)
 
     os.makedirs(OUT_DIR,   exist_ok=True)
     os.makedirs(VIDEO_DIR, exist_ok=True)
@@ -564,11 +583,14 @@ def main():
             for tid in range(N_TRIALS):
                 seed    = TRIAL_SEED_BASE + tid
                 out_dir = os.path.join(OUT_DIR, f"trial_{tid:04d}")
-                print(f"\n[main] Trial {tid + 1}/{N_TRIALS}")
+                ic_idx  = idx_seq[tid]
+                ic_tag  = f'IC#{ic_idx}' if ic_idx is not None else 'fresh spawn'
+                print(f"\n[main] Trial {tid + 1}/{N_TRIALS}  ({ic_tag})")
                 try:
                     res = run_trial(trial_id=tid, seed=seed, preview=PREVIEW,
                                     video_dir=VIDEO_DIR, out_dir=out_dir,
-                                    actuations=actuations, ALL_INIT=ALL_INIT, use_preset=USE_PRESET)
+                                    actuations=actuations, ALL_INIT=ALL_INIT,
+                                    use_preset=USE_PRESET, init_idx=ic_idx)
                     results.append(res)
                 except Exception as e:
                     print(f"[main] Trial {tid} failed: {e}")
@@ -582,7 +604,8 @@ def main():
                     futures.append(ex.submit(
                         run_trial, trial_id=tid, seed=seed, preview=PREVIEW,
                         video_dir=VIDEO_DIR, out_dir=out_dir,
-                        actuations=actuations, ALL_INIT=ALL_INIT))
+                        actuations=actuations, ALL_INIT=ALL_INIT,
+                        init_idx=idx_seq[tid]))
                 completed = 0
                 for fut in as_completed(futures):
                     try:

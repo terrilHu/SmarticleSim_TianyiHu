@@ -12,8 +12,15 @@ import random
 
 # ── Trial / seed ──────────────────────────────────────────────────────────────
 TRIAL_SEED_BASE   = 12345
-N_TRIALS_GLOBAL   = 1       # 0 means auto-read from initial-conditions file
+N_TRIALS_GLOBAL   = 3       # 0 means auto-read from initial-conditions file
 MAX_RUNTIME       = 45.0    # in seconds
+
+# ── Initial-condition selection (only used when ALREADY_SPWANED = True) ────
+# "sequential" : use init_conditions[0], [1], [2] ... in order (default)
+# "random"     : draw without replacement each run; reshuffles when the pool
+#                is exhausted (trials may repeat across reshuffles but never
+#                within one)
+INIT_SELECTION    = "random"
 
 # ── Video recording ───────────────────────────────────────────────────────────
 RECORD_VIDEO      = True
@@ -59,6 +66,56 @@ ARM_LEN,  ARM_W   = max(18, int(BASE_ARM_LEN  * SCALE)), max(3,  int(BASE_ARM_W 
 # ── Wall physics ──────────────────────────────────────────────────────────────
 WALL_FRICTION     = 0.9
 WALL_ELASTICITY   = 0.0
+
+# ── Heterogeneous bodies (per-individual physical characteristics) ────────────
+# When ENABLE_HETEROGENEOUS_BODIES is False the simulation is fully homogeneous
+# and behaves EXACTLY as before (every robot uses the global geometry above).
+#
+# When True, every robot is assigned a "body type" by index via BODY_ASSIGNMENT.
+# A body type is a dict of OVERRIDES on the base (UNSCALED) geometry; anything not
+# listed falls back to the BASE_* defaults, and the same SCALE pipeline + clamps
+# used for the global geometry are applied automatically (see bodies.py).
+#
+# Recognised override keys:
+#   "main_len_base", "main_w_base", "arm_len_base", "arm_w_base"  (unscaled px)
+#   "mass_main", "mass_arm"   (absolute, already-scaled; optional)
+# If a mass is omitted it is auto-derived from the area ratio relative to the
+# homogeneous default, so a bigger arm is automatically heavier.
+ENABLE_HETEROGENEOUS_BODIES = True
+
+# Library of reusable body types ("species"). "default" = the global geometry.
+BODY_TYPES = {
+    "default":   {},                       # global BASE_* geometry, unchanged
+    "long_arm":  {"arm_len_base": 110},    # longer arms (base 70 -> 110)
+    "short_arm": {"arm_len_base": 45},     # shorter arms (base 70 -> 40)
+    # "heavy":   {"main_w_base": 60, "mass_main": 400.0},
+}
+
+# Per-robot assignment; length MUST equal N_SMARTICLES. Each entry is a key of
+# BODY_TYPES. Example for a 17-robot mixed population:
+#   BODY_ASSIGNMENT = (["long_arm"] * 6) + (["short_arm"] * 6) + (["default"] * 5)
+BODY_ASSIGNMENT = ["default"] * 13 + ["short_arm"] * 4
+random.shuffle(BODY_ASSIGNMENT)
+
+# Per-robot command array; length must equal N_SMARTICLES.
+# Each entry is a signed 3-digit integer ±XYZ where:
+#   X (hundreds, 0-8) : initial phase  — 0 = random, 1-8 from table
+#   Y (tens,     1-6) : amplitude      — lookup table index
+#   Z (units,    1-9) : frequency      — lookup table index
+#   sign (+)          : both joints same phase
+#   sign (-)          : joints in antiphase (phase2 = phase1 + pi)
+# Example: -226 → antiphase, |phase|=pi/2, A=pi/6, f=3Hz
+#          +051 → same phase, phase=random, A=pi*5/12, f=0.5Hz
+#COMMAND_ARRAY = [862] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
+COMMAND_ARRAY = [826] * 13 + [-62] * 4
+random.shuffle(COMMAND_ARRAY)
+
+# GAIT_BY_TYPE will be automatically chosen when heterogeneous is enabled
+GAIT_BY_TYPE = {
+    "default":    -851,    
+    "long_arm":  -426,   
+    "short_arm":  861,   
+}
 
 # ── Ring (confining boundary) options ─────────────────────────────────────────
 # The boundary can be FIXED (anchored to the world) or MOVABLE (free to move),
@@ -111,48 +168,6 @@ SPACE_DAMP        = 1.0     # velocity reserved each step
 JOINT_LIMIT_DEG   = 95.0    # hard joint angle limit (deg)
 KP_NOM            = 60.0    # proportional gain for motor PD controller
 
-# Per-robot command array; length must equal N_SMARTICLES.
-# Each entry is a signed 3-digit integer ±XYZ where:
-#   X (hundreds, 0-8) : initial phase  — 0 = random, 1-8 from table
-#   Y (tens,     1-6) : amplitude      — lookup table index
-#   Z (units,    1-9) : frequency      — lookup table index
-#   sign (+)          : both joints same phase
-#   sign (-)          : joints in antiphase (phase2 = phase1 + pi)
-# Example: -226 → antiphase, |phase|=pi/2, A=pi/6, f=3Hz
-#          +051 → same phase, phase=random, A=pi*5/12, f=0.5Hz
-COMMAND_ARRAY = [862] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
-#COMMAND_ARRAY = [842] * 9 + [-842] * 8
-random.shuffle(COMMAND_ARRAY)
-
-# ── Heterogeneous bodies (per-individual physical characteristics) ────────────
-# When ENABLE_HETEROGENEOUS_BODIES is False the simulation is fully homogeneous
-# and behaves EXACTLY as before (every robot uses the global geometry above).
-#
-# When True, every robot is assigned a "body type" by index via BODY_ASSIGNMENT.
-# A body type is a dict of OVERRIDES on the base (UNSCALED) geometry; anything not
-# listed falls back to the BASE_* defaults, and the same SCALE pipeline + clamps
-# used for the global geometry are applied automatically (see bodies.py).
-#
-# Recognised override keys:
-#   "main_len_base", "main_w_base", "arm_len_base", "arm_w_base"  (unscaled px)
-#   "mass_main", "mass_arm"   (absolute, already-scaled; optional)
-# If a mass is omitted it is auto-derived from the area ratio relative to the
-# homogeneous default, so a bigger arm is automatically heavier.
-ENABLE_HETEROGENEOUS_BODIES = True
-
-# Library of reusable body types ("species"). "default" = the global geometry.
-BODY_TYPES = {
-    "default":   {},                       # global BASE_* geometry, unchanged
-    "long_arm":  {"arm_len_base": 110},    # longer arms (base 70 -> 110)
-    "short_arm": {"arm_len_base": 45},     # shorter arms (base 70 -> 40)
-    # "heavy":   {"main_w_base": 60, "mass_main": 400.0},
-}
-
-# Per-robot assignment; length MUST equal N_SMARTICLES. Each entry is a key of
-# BODY_TYPES. Example for a 17-robot mixed population:
-#   BODY_ASSIGNMENT = (["long_arm"] * 6) + (["short_arm"] * 6) + (["default"] * 5)
-BODY_ASSIGNMENT = ["default"] * 17
-random.shuffle(BODY_ASSIGNMENT)
 
 # ── Coupling / interaction model ──────────────────────────────────────────────
 L    = MAIN_W
