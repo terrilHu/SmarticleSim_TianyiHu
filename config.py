@@ -12,8 +12,8 @@ import random
 
 # ── Trial / seed ──────────────────────────────────────────────────────────────
 TRIAL_SEED_BASE   = 12345
-N_TRIALS_GLOBAL   = 3       # 0 means auto-read from initial-conditions file
-MAX_RUNTIME       = 45.0    # in seconds
+N_TRIALS_GLOBAL   = 1       # 0 means auto-read from initial-conditions file
+MAX_RUNTIME       = 60.0    # in seconds
 
 # ── Initial-condition selection (only used when ALREADY_SPWANED = True) ────
 # "sequential" : use init_conditions[0], [1], [2] ... in order (default)
@@ -81,7 +81,7 @@ WALL_ELASTICITY   = 0.0
 #   "mass_main", "mass_arm"   (absolute, already-scaled; optional)
 # If a mass is omitted it is auto-derived from the area ratio relative to the
 # homogeneous default, so a bigger arm is automatically heavier.
-ENABLE_HETEROGENEOUS_BODIES = True
+ENABLE_HETEROGENEOUS_BODIES = False
 
 # Library of reusable body types ("species"). "default" = the global geometry.
 BODY_TYPES = {
@@ -94,7 +94,7 @@ BODY_TYPES = {
 # Per-robot assignment; length MUST equal N_SMARTICLES. Each entry is a key of
 # BODY_TYPES. Example for a 17-robot mixed population:
 #   BODY_ASSIGNMENT = (["long_arm"] * 6) + (["short_arm"] * 6) + (["default"] * 5)
-BODY_ASSIGNMENT = ["default"] * 13 + ["short_arm"] * 4
+BODY_ASSIGNMENT = ["default"] * 17
 random.shuffle(BODY_ASSIGNMENT)
 
 # Per-robot command array; length must equal N_SMARTICLES.
@@ -107,7 +107,7 @@ random.shuffle(BODY_ASSIGNMENT)
 # Example: -226 → antiphase, |phase|=pi/2, A=pi/6, f=3Hz
 #          +051 → same phase, phase=random, A=pi*5/12, f=0.5Hz
 #COMMAND_ARRAY = [862] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
-COMMAND_ARRAY = [826] * 13 + [-62] * 4
+COMMAND_ARRAY = [862] * 9 + [462] * 8
 random.shuffle(COMMAND_ARRAY)
 
 # GAIT_BY_TYPE will be automatically chosen when heterogeneous is enabled

@@ -81,6 +81,21 @@ def should_record_trial(trial_id: int) -> bool:
     return do_mod
 
 
+def _phase_to_color(phase: float):
+    """
+    Map an initial phase (radians, any real) to an RGB color via the HSV wheel.
+
+    Hue = phase / 2pi, so the 8 discrete phase-table values land on 8 evenly
+    spaced, easily distinguished hues, while a random phase (command digit
+    x == 0) gets a unique color reflecting its actual sampled value. Saturation
+    and value are kept high so markers stand out against the white background.
+    """
+    import colorsys
+    hue = (phase % (2 * math.pi)) / (2 * math.pi)
+    r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 0.95)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
 # =============================================================================
 # Core simulation
 # =============================================================================
@@ -251,6 +266,11 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
         s.A2     = ampli
         s.phase1 = ph1
         s.phase2 = ph2
+        # Marker color encodes the INITIAL PHASE. If x is 1-8 the phase is one
+        # of the 8 discrete table values; if x == 0 the phase is random, so we
+        # color by the actual sampled ph1. Mapping phase in [0, 2pi) to an HSV
+        # hue distinguishes the 8 discrete bins and also handles random phases.
+        s.phase_marker_color = _phase_to_color(ph1)
         s.warmup_steps = WARMUP_STEPS
         s._warmup_step = 0
 
@@ -266,10 +286,23 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
 
     def _blit_id_labels(dst):
         for idx, ss in enumerate(smarticles):
+            cx, cy = int(ss.main_body.position.x), int(ss.main_body.position.y)
+            label  = str(idx + 1)
+            surf_w = font.render(label, True, (0, 0, 0))
+            surf_s = font.render(label, True, (255, 255, 255))
+            tw, th = surf_w.get_size()
+            # blit at top-left = center - half-size so the text is centred on (cx, cy)
+            lx, ly = cx - tw // 2, cy - th // 2
+            dst.blit(surf_s, (lx + 1, ly + 1))   # white shadow
+            dst.blit(surf_w, (lx,     ly    ))    # black text
+
+    def _blit_phase_markers(dst, radius=7):
+        """Draw a filled circle on each robot colored by its initial phase."""
+        for ss in smarticles:
             x, y  = int(ss.main_body.position.x), int(ss.main_body.position.y)
-            label = str(idx + 1)
-            dst.blit(font.render(label, True, (255, 255, 255)), (x + 1, y + 1))
-            dst.blit(font.render(label, True, (0,   0,   0  )), (x,     y    ))
+            color = getattr(ss, "phase_marker_color", (180, 180, 180))
+            pygame.draw.circle(dst, (0, 0, 0), (x, y), radius + 1)   # outline
+            pygame.draw.circle(dst, color,     (x, y), radius)
 
     record_this   = should_record_trial(trial_id)
     recorder_orig = None
@@ -405,6 +438,7 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
             if record_this:
                 orig_surf.fill((255, 255, 255))
                 space.debug_draw(draw_options_orig)
+                _blit_phase_markers(orig_surf)
                 _blit_id_labels(orig_surf)
                 if frame_i % max(1, VIDEO_STRIDE) == 0:
                     recorder_orig.add_frame_from_surface(orig_surf)
