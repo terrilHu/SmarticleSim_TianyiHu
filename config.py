@@ -12,15 +12,27 @@ import random
 
 # ── Trial / seed ──────────────────────────────────────────────────────────────
 TRIAL_SEED_BASE   = 12345
-N_TRIALS_GLOBAL   = 1       # 0 means auto-read from initial-conditions file
-MAX_RUNTIME       = 60.0    # in seconds
+N_TRIALS_GLOBAL   = 3       # 0 means auto-read from initial-conditions file
+MAX_RUNTIME       = 120.0    # in seconds
 
 # ── Initial-condition selection (only used when ALREADY_SPWANED = True) ────
 # "sequential" : use init_conditions[0], [1], [2] ... in order (default)
 # "random"     : draw without replacement each run; reshuffles when the pool
 #                is exhausted (trials may repeat across reshuffles but never
 #                within one)
-INIT_SELECTION    = "random"
+# "explicit"   : run exactly the IC indices listed in INIT_INDICES, in that
+#                order (repeats allowed, e.g. to re-run the same IC with
+#                different seeds).  N_TRIALS is IGNORED in this mode -- the
+#                trial count is len(INIT_INDICES).
+INIT_SELECTION    = "explicit"
+
+# Only read when INIT_SELECTION == "explicit".  0-based indices into the
+# loaded initial-conditions file (same numbering as "IC#" in the console log
+# and in the summary CSV's ic_idx column).
+#   INIT_INDICES = [40]              # just IC#40, once
+#   INIT_INDICES = [40, 40, 40]      # IC#40, three times (e.g. different seeds)
+#   INIT_INDICES = list(range(50, 60))   # IC#50 .. IC#59
+INIT_INDICES      = [116, 87, 194]
 
 # ── Video recording ───────────────────────────────────────────────────────────
 RECORD_VIDEO      = True
@@ -40,7 +52,7 @@ WARMUP_STEPS        = 180
 RECORD_AFTER_WARMUP = True
 
 # ── Experiment size ───────────────────────────────────────────────────────────
-N_SMARTICLES      = 17         # number of smarticles in the simulation
+N_SMARTICLES      = 100         # number of smarticles in the simulation
 
 # ── Reference geometry (used for auto-scaling) ────────────────────────────────
 BASE_N_REF        = 17         # population the reference arena was tuned for
@@ -128,7 +140,7 @@ random.shuffle(BODY_ASSIGNMENT)
 # Two-population mix, expressed as a fraction so it follows N_SMARTICLES.
 # At N_SMARTICLES = 17 this is exactly [862] * 9 + [462] * 8 as before.
 _CMD_A, _CMD_B    = 862, 462
-_CMD_A_FRACTION   = 9 / 17
+_CMD_A_FRACTION   = 0 / 17
 _n_cmd_a          = int(round(N_SMARTICLES * _CMD_A_FRACTION))
 COMMAND_ARRAY = [_CMD_A] * _n_cmd_a + [_CMD_B] * (N_SMARTICLES - _n_cmd_a)
 random.shuffle(COMMAND_ARRAY)
@@ -153,8 +165,8 @@ GAIT_BY_TYPE = {
 #   polygon + fixed    : regular n-gon wall held in place at its corners.
 #   polygon + movable  : n rigid edge-links joined by free-rotating corner
 #                        hinge joints — a deformable loop the swarm can reshape.
-RING_MOVABLE   = True        # False = fixed (default); True = movable
-RING_SHAPE     = "polygon"     # "circle" (default) | "polygon"
+RING_MOVABLE   = False        # False = fixed (default); True = movable
+RING_SHAPE     = "circle"     # "circle" (default) | "polygon"
 
 # --- Ring scaling with population -------------------------------------------
 # Both knobs are exactly 1.0 at N_SMARTICLES == BASE_N_REF, so the reference
@@ -209,6 +221,19 @@ OMEGA_NOM2        = 3 * 2 * math.pi   # right arm frequency (rad/s)
 RATE_LIM          = 8.0     # motor velocity clamp (rad/s)
 ANG_DAMP          = 0.8     # per-step angular velocity damping factor
 LIN_DAMP          = 0.8     # per-step linear velocity damping factor
+
+# A movable ring (RING_MOVABLE = True) previously had NO per-step damping of
+# its own -- only the global space.damping (SPACE_DAMP, currently 1.0 = no
+# decay).  Once hit, it would coast/spin with no floor drag, unlike every
+# robot main_body, which gets LIN_DAMP / ANG_DAMP each step.  This applies the
+# SAME per-step damping to the ring (its single body if RING_SHAPE="circle",
+# or every edge body if RING_SHAPE="polygon").
+#
+# *** Behaviour change: any existing RING_MOVABLE=True run will now produce a
+# *** different trajectory than before (the ring no longer coasts freely).
+# *** RING_MOVABLE=False runs are completely unaffected (nothing to damp).
+# Set to False to restore the old undamped-ring behaviour.
+RING_DAMPING_ENABLED = True
 SPACE_DAMP        = 1.0     # velocity reserved each step
 JOINT_LIMIT_DEG   = 95.0    # hard joint angle limit (deg)
 KP_NOM            = 60.0    # proportional gain for motor PD controller

@@ -22,10 +22,12 @@ from config import (
     # experiment
     ALREADY_SPWANED, N_SMARTICLES, TRIAL_SEED_BASE, N_TRIALS_GLOBAL,
     COMMAND_ARRAY, WARMUP_STEPS, RECORD_AFTER_WARMUP, MAX_RUNTIME, INIT_SELECTION,
+    INIT_INDICES,
     # geometry / physics
     W, H, INNER_R, WALL_THICK, WALL_SEGMENTS, WALL_FRICTION, WALL_ELASTICITY,
     RING_MOVABLE, RING_SHAPE, RING_N_SIDES, RING_COLOR_BANDS,
     RENDER_FPS_HEADLESS, RATE_LIM, V_MAX, W_MAX, ANG_DAMP, SPACE_DAMP, LIN_DAMP, ENABLE_HETEROGENEOUS_BODIES,
+    RING_DAMPING_ENABLED,
     # interaction model
     L, L_s, WC, R0, a0, a1, g0,
     # recording
@@ -220,8 +222,13 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
         eff_inner_r = INNER_R * math.cos(math.pi / max(3, int(RING_N_SIDES)))
 
     # ── Spawn / load ──────────────────────────────────────────────────────────
+    # Track the IC index actually used, if any, so it can be reported in the
+    # summary CSV regardless of how it was chosen (explicit / random /
+    # sequential / the trial_id fallback below).  None for a fresh spawn.
+    used_ic_idx = None
     if ALREADY_SPWANED:
         _idx = init_idx if init_idx is not None else trial_id
+        used_ic_idx = _idx
         #smarticles = build_from_initial_conditions(space, ALL_INIT[trial_id])
         smarticles = build_from_initial_conditions(space, ALL_INIT[_idx])
     else:
@@ -371,6 +378,19 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     # arithmetic.
     ctrl_plan = [(s, s.main_body, s.motor_L, s.motor_R) for s in smarticles]
 
+    # Dynamic bodies making up a MOVABLE ring, so it can get the same per-step
+    # floor damping as every robot main_body (see RING_DAMPING_ENABLED).  Empty
+    # for a fixed ring (RING_MOVABLE=False) or when the toggle is off, so the
+    # loop below costs nothing in that case -- which covers every run in this
+    # codebase's regression baseline (RING_MOVABLE defaults to True, but this
+    # flag can be set False to reproduce the old, undamped-ring trajectories).
+    ring_damp_bodies = []
+    if RING_DAMPING_ENABLED and RING_MOVABLE:
+        if ring.body is not None:            # movable circle: one rigid body
+            ring_damp_bodies = [ring.body]
+        elif ring.bodies:                    # movable polygon: one body/edge
+            ring_damp_bodies = list(ring.bodies)
+
     _vstride = max(1, VIDEO_STRIDE)
 
     # ── Main loop ─────────────────────────────────────────────────────────────
@@ -401,6 +421,15 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
                 if abs(av) > W_MAX:
                     av = max(-W_MAX, min(W_MAX, av))
                 mb.angular_velocity = av * ANG_DAMP
+
+            # Ring floor damping -- see ring_damp_bodies above.  A plain Python
+            # loop (not vectorised): pymunk Body objects aren't batchable, and
+            # the list is at most RING_N_SIDES long (35-85 across N=17..100),
+            # far smaller than the n-robot loop already run every step above,
+            # so this is not a meaningful addition to per-step cost.
+            for rb in ring_damp_bodies:
+                rb.velocity         *= LIN_DAMP
+                rb.angular_velocity *= ANG_DAMP
 
             space.step(dt)
             t += dt
@@ -557,6 +586,7 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
             print(f"[WARN] alignment computation failed: {e}")
 
     return {"trial_id": trial_id,
+            "ic_idx": used_ic_idx if used_ic_idx is not None else "",
             "final_rg": final_rg,
             "final_kappa": final_kappa,
             "final_area":  final_area}
@@ -599,7 +629,7 @@ def save_config_snapshot(out_dir: str):
 def main():
     WORKERS   = PARALLEL_WORKERS           # >1 for parallel trials (config.py)
     PREVIEW   = False
-    INIT_FILE = "init_conditions/init_conditions_200_H.json"
+    INIT_FILE = "init_conditions/init_conditions_200_N100.json"
     #INIT_FILE = os.path.join("init_conditions", EXP_NAME + ".json")
     N_TRIALS  = N_TRIALS_GLOBAL            # 0 = auto-read from init file
     USE_PRESET = True
@@ -639,7 +669,24 @@ def main():
 
         # Build per-trial IC index list according to INIT_SELECTION.
         pool = list(range(len(ALL_INIT)))
-        if (INIT_SELECTION or 'sequential').lower().startswith('rand'):
+        _sel = (INIT_SELECTION or 'sequential').lower()
+
+        if _sel.startswith('exp'):
+            # Explicit list: the trial count IS len(INIT_INDICES), overriding
+            # N_TRIALS_GLOBAL / the auto-read-from-file count above.
+            if not INIT_INDICES:
+                raise ValueError(
+                    "INIT_SELECTION='explicit' but config.INIT_INDICES is empty.")
+            bad = [i for i in INIT_INDICES if not (0 <= i < len(pool))]
+            if bad:
+                raise ValueError(
+                    f"INIT_INDICES has out-of-range indices {bad}; the loaded "
+                    f"IC file only has indices 0..{len(pool) - 1}.")
+            idx_seq  = list(INIT_INDICES)
+            N_TRIALS = len(idx_seq)
+            print(f'[main] IC selection: EXPLICIT '
+                  f'({N_TRIALS} trial(s) from INIT_INDICES: {idx_seq})')
+        elif _sel.startswith('rand'):
             idx_seq, shuffled = [], []
             for _ in range(N_TRIALS):
                 if not shuffled:

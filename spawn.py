@@ -220,9 +220,14 @@ def spawn_smarticles(space: pymunk.Space, center: pymunk.Vec2d,
     return smarts
 
 
+FOLD_MIN_RINGS = math.radians(60.0)
+FOLD_MAX_RINGS = math.radians(85.0)
+
+
 def spawn_smarticles_rings(space: pymunk.Space, center: pymunk.Vec2d,
                            inner_r: float, n: int,
-                           fill: float = 0.86) -> list:
+                           fill: float = 0.86,
+                           relax_steps: int = 6000) -> list:
     """
     Vogel / sunflower placement, then the same physics relax as
     :func:`spawn_smarticles`.
@@ -235,6 +240,22 @@ def spawn_smarticles_rings(space: pymunk.Space, center: pymunk.Vec2d,
     The sunflower spiral
 
         r_k = R * sqrt((k + 0.5) / n),   theta_k = k * golden_angle
+
+    ``relax_steps`` is much larger than the legacy spawner's 600.  At the
+    reference packing fraction the spiral's neighbour spacing is comparable to
+    a folded robot's footprint, so the layout starts marginally jammed and the
+    relax needs time to work the overlaps out.  Measured at N = 50 (4 seeds,
+    200 robots, overlap = contact deeper than 3 px):
+
+        relax=  600   centre bin 0.23   overlapping 41/200   0.10 s
+        relax= 2000   centre bin 0.23   overlapping 28/200   0.26 s
+        relax= 6000   centre bin 0.21   overlapping  0/200   0.66 s   <- default
+        relax=15000   centre bin 0.23   overlapping  0/200   1.40 s
+
+    (uniform occupancy = 0.20 per equal-area bin; the N=17 legacy layout sits
+    at mean r/R = 0.626, and relax=6000 reproduces 0.623.)
+
+    The spiral
 
     gives near-uniform areal density for any n, so the nearest-neighbour
     spacing is ~ R * sqrt(pi / n).  Combined with AUTO_SCALE_ARENA (R grows as
@@ -253,19 +274,26 @@ def spawn_smarticles_rings(space: pymunk.Space, center: pymunk.Vec2d,
         target_pos = center + pymunk.Vec2d(r * math.cos(angle), r * math.sin(angle))
         heading    = angle + math.pi / 2 + random.choice([0, math.pi]) + random.uniform(-0.2, 0.2)
 
-        sm     = Smarticle3Link(space, **resolve_body_params(i))
-        offset = target_pos - sm.main_body.position
-        sm.main_body.position  += offset
-        sm.left_body.position  += offset
-        sm.right_body.position += offset
-        sm.main_body.angle      = heading
+        # Arms start FOLDED, and are placed via set_folded_pose.
+        #
+        # The spiral's neighbour spacing is ~R*sqrt(pi/n) (~90 px at the
+        # reference density).  With nearly straight arms a robot spans
+        # main_len + 2*arm_len = 210 px, so relax must resolve heavy overlap,
+        # and the only free space is the empty annulus by the wall -- the swarm
+        # is pushed outward and the centre drains.  Folded, the footprint is
+        # much closer to the spacing.  set_folded_pose also puts the arm bodies
+        # where the pivot joints want them (offset-only placement leaves every
+        # joint violated by (main_len + arm_len)/2 = 70 px).
+        fold = ((1 if random.random() < 0.5 else -1)
+                * random.uniform(FOLD_MIN_RINGS, FOLD_MAX_RINGS))
 
-        fold = random.uniform(-math.pi / 6, math.pi / 6)
-        sm.left_body.angle  = heading + fold
-        sm.right_body.angle = heading - fold
+        sm = Smarticle3Link(space, **resolve_body_params(i))
+        sm.set_folded_pose(target_pos, heading, fold, -fold)
+        for b in sm.bodies():
+            space.reindex_shapes_for_body(b)
         smarts.append(sm)
 
-    relax_system(space, steps=600)
+    relax_system(space, steps=relax_steps)
     return smarts
 
 
