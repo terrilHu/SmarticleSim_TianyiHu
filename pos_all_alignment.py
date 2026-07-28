@@ -46,20 +46,23 @@ def voronoi_adjacency(positions: np.ndarray, max_dist: float):
     except Exception:
         return adj
 
-    # Extract unique edges from triangles
+    # Extract unique edges from triangles (vectorised; same edge set as the
+    # previous Python set-of-tuples, just built with NumPy).
     simplices = tri.simplices          # (T, 3)
-    edge_set  = set()
-    for s in simplices:
-        for a, b in [(s[0],s[1]), (s[1],s[2]), (s[0],s[2])]:
-            edge_set.add((min(a,b), max(a,b)))
+    edges = np.concatenate((simplices[:, [0, 1]],
+                            simplices[:, [1, 2]],
+                            simplices[:, [0, 2]]), axis=0)
+    edges = np.sort(edges, axis=1)
+    edges = np.unique(edges, axis=0)
 
-    for li, lj in edge_set:
-        i = valid_idx[li]
-        j = valid_idx[lj]
-        d = np.linalg.norm(pts[li] - pts[lj])
-        if d <= max_dist:
-            adj[i, j] = True
-            adj[j, i] = True
+    diff = pts[edges[:, 0]] - pts[edges[:, 1]]
+    d    = np.sqrt(diff[:, 0] ** 2 + diff[:, 1] ** 2)
+    keep = edges[d <= max_dist]
+
+    ii = valid_idx[keep[:, 0]]
+    jj = valid_idx[keep[:, 1]]
+    adj[ii, jj] = True
+    adj[jj, ii] = True
 
     return adj
 
@@ -102,15 +105,26 @@ def process_pos_all(csv_path: str, max_dist: float) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df.columns = df.columns.str.strip()
 
-    steps      = sorted(df["Step"].unique())
     n_agents   = df["Agent_ID"].nunique()
     results    = []
 
-    for step in steps:
-        frame = df[df["Step"] == step].sort_values("Agent_ID")
+    # The original re-scanned the whole table once per step
+    # (df[df["Step"] == step]), i.e. O(frames * rows) = O(frames^2 * n) work.
+    # Sorting once by (Step, Agent_ID) makes every frame a contiguous slice,
+    # which yields exactly the same per-frame arrays in the same order.
+    df = df.sort_values(["Step", "Agent_ID"], kind="mergesort")
+    step_col = df["Step"].to_numpy()
+    xy_all   = df[["X", "Y"]].to_numpy(dtype=float)
+    th_all   = df["Theta"].to_numpy(dtype=float)
 
-        positions = frame[["X", "Y"]].to_numpy(dtype=float)   # (N, 2)
-        thetas    = frame["Theta"].to_numpy(dtype=float)       # (N,) radians
+    steps, starts = np.unique(step_col, return_index=True)
+    bounds = np.append(starts, len(step_col))
+
+    for _k, step in enumerate(steps):
+        sl = slice(bounds[_k], bounds[_k + 1])
+
+        positions = xy_all[sl]                                 # (N, 2)
+        thetas    = th_all[sl]                                 # (N,) radians
 
         # 1. Voronoi adjacency matrix
         adj = voronoi_adjacency(positions, max_dist)

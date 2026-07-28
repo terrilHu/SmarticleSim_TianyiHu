@@ -30,16 +30,19 @@ from config import (
     L, L_s, WC, R0, a0, a1, g0,
     # recording
     RECORD_VIDEO, RECORD_POLICY, RECORD_EVERY_K, RECORD_FIRST_N, VIDEO_STRIDE,
+    PARALLEL_WORKERS,
     # actuation
     OMEGA_NOM1, OMEGA_NOM2, A_DEG_NOM1, A_DEG_NOM2,
 )
 from smarticle import Smarticle3Link, add_ring, wrap_pi
 from spawn import (
-    build_from_initial_conditions, load_initial_conditions, spawn_smarticles,
+    build_from_initial_conditions, load_initial_conditions,
+    spawn_smarticles, spawn_smarticles_auto,
 )
 from analysis import (
     VideoRecorder,
     actuationimpactCalculation, actutaionDetermination,
+    build_pair_matrices,
     calculate_macro_shape, calculate_orientational_order,
     compute_gr, dist_to_inner_wall, rotation_order_parameters,
     sigmoid, wall_strength, write_results_csv,
@@ -222,7 +225,7 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
         #smarticles = build_from_initial_conditions(space, ALL_INIT[trial_id])
         smarticles = build_from_initial_conditions(space, ALL_INIT[_idx])
     else:
-        smarticles = spawn_smarticles(space, center, eff_inner_r, N_SMARTICLES)
+        smarticles = spawn_smarticles_auto(space, center, eff_inner_r, N_SMARTICLES)
 
     initial_positions = [s.main_body.position for s in smarticles]
 
@@ -284,12 +287,23 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     font             = pygame.font.Font(None, 16)
     draw_options_orig = pymunk.pygame_util.DrawOptions(orig_surf)
 
+    # Glyph surfaces depend only on the label text, so render each label once
+    # and reuse it for every frame: identical pixels, but ~2n fewer
+    # font.render() calls per frame (this dominates at n = 100).
+    _label_cache = {}
+
+    def _label_surfaces(label):
+        pair = _label_cache.get(label)
+        if pair is None:
+            pair = (font.render(label, True, (0, 0, 0)),
+                    font.render(label, True, (255, 255, 255)))
+            _label_cache[label] = pair
+        return pair
+
     def _blit_id_labels(dst):
         for idx, ss in enumerate(smarticles):
             cx, cy = int(ss.main_body.position.x), int(ss.main_body.position.y)
-            label  = str(idx + 1)
-            surf_w = font.render(label, True, (0, 0, 0))
-            surf_s = font.render(label, True, (255, 255, 255))
+            surf_w, surf_s = _label_surfaces(str(idx + 1))
             tw, th = surf_w.get_size()
             # blit at top-left = center - half-size so the text is centred on (cx, cy)
             lx, ly = cx - tw // 2, cy - th // 2
@@ -324,13 +338,17 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     D0_WALL    = 1.0 * L_s
     K_WALL     = 1.0
 
-    n = N_SMARTICLES
-    dx_matrix  = np.zeros((n, n))
-    dy_matrix  = np.zeros((n, n))
-    dPsi_matrix= np.zeros((n, n))
-    dxy_matrix = np.zeros((n, n))
-    Aij_matrix = np.zeros((n, n))
+    # Use the real population size instead of the config constant so a trial
+    # stays consistent if an IC file holds a different count.  Identical
+    # whenever len(smarticles) == N_SMARTICLES, which was always the case.
+    n = len(smarticles)
     A_wall     = np.zeros((n,), dtype=np.float32)
+
+    # Scratch arrays reused across frames (positions / angles / displacements).
+    px_buf   = np.empty(n); py_buf  = np.empty(n); psi_buf = np.empty(n)
+    ipx      = np.array([p.x for p in initial_positions], dtype=float)
+    ipy      = np.array([p.y for p in initial_positions], dtype=float)
+    cx_c, cy_c = float(center.x), float(center.y)
 
     # ── Per-robot geometry for the (possibly heterogeneous) coupling model ────
     # In a homogeneous run every entry equals the global L / L_s / S, so the
@@ -339,6 +357,22 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     Lw_i   = np.array([s.main_w   for s in smarticles], dtype=float)  # body width (== L)
     Smain_i= np.array([s.main_len for s in smarticles], dtype=float)  # body length (== S)
 
+    # actuationimpactCalculation() depends ONLY on robot i's own actuation
+    # parameters, which are fixed for the whole trial.  The original evaluated
+    # it once per (i, j) pair per frame -> O(n^2 * frames) scipy integrations.
+    # Hoisting it here is exact: identical values, evaluated n times, once.
+    _acts   = [actuationimpactCalculation(s.omega1, s.omega2, s.A1, s.A2)
+               for s in smarticles]
+    acts0_i = np.array([a[0] for a in _acts], dtype=float)
+    acts1_i = np.array([a[1] for a in _acts], dtype=float)
+    # Pre-bind the pymunk handles touched every physics step.  Attribute
+    # chains like s.main_body.velocity are resolved 180 x n times per simulated
+    # second; caching the objects removes that lookup without changing any
+    # arithmetic.
+    ctrl_plan = [(s, s.main_body, s.motor_L, s.motor_R) for s in smarticles]
+
+    _vstride = max(1, VIDEO_STRIDE)
+
     # ── Main loop ─────────────────────────────────────────────────────────────
     running = True
     while running:
@@ -346,25 +380,27 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
         steps_per_frame = max(1, int(round((1.0 / RENDER_FPS_HEADLESS) / dt)))
 
         for _ in range(steps_per_frame):
-            for s in smarticles:
+            # The clamp pass and the damping pass are fused into one loop.
+            # This is exactly equivalent: neither pass reads another robot's
+            # state, step_control() never reads velocities, and damping never
+            # touches angles -- so per-robot the operation order is unchanged.
+            # Fusing removes one full Python pass and roughly halves the number
+            # of (expensive) pymunk property round-trips per robot per step.
+            for s, mb, mL, mR in ctrl_plan:
                 s.step_control(t)
-                # s.motor_L.rate = max(-RATE_LIM, min(RATE_LIM, s.motor_L.rate))
-                # s.motor_R.rate = max(-RATE_LIM, min(RATE_LIM, s.motor_R.rate))
 
-                s.motor_L.rate = RATE_LIM * math.tanh(1.0 * s.motor_L.rate / RATE_LIM)
-                s.motor_R.rate = RATE_LIM * math.tanh(1.0 * s.motor_R.rate / RATE_LIM)
+                mL.rate = RATE_LIM * math.tanh(mL.rate / RATE_LIM)
+                mR.rate = RATE_LIM * math.tanh(mR.rate / RATE_LIM)
 
-                if s.main_body.velocity.length > V_MAX:
-                    s.main_body.velocity = s.main_body.velocity.normalized() * V_MAX
-                if abs(s.main_body.angular_velocity) > W_MAX:
-                    s.main_body.angular_velocity = max(-W_MAX, min(W_MAX, s.main_body.angular_velocity))
+                v = mb.velocity
+                if v.length > V_MAX:
+                    v = v.normalized() * V_MAX
+                mb.velocity = v * LIN_DAMP
 
-            for s in smarticles:
-                s.main_body.velocity         *= LIN_DAMP
-                s.main_body.angular_velocity *= ANG_DAMP   
-
-                # for b in s.bodies():
-                #     b.angular_velocity *= ANG_DAMP
+                av = mb.angular_velocity
+                if abs(av) > W_MAX:
+                    av = max(-W_MAX, min(W_MAX, av))
+                mb.angular_velocity = av * ANG_DAMP
 
             space.step(dt)
             t += dt
@@ -377,55 +413,54 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
             positions = [s.main_body.position for s in smarticles]
             psis      = [s.main_body.angle    for s in smarticles]
             rot_ord   = rotation_order_parameters(psis, positions, center)
-            mdists    = []
 
-            for i in range(n):
-                dgap, r      = dist_to_inner_wall(positions[i], center, INNER_R)
-                A_wall[i], _ = wall_strength(dgap, Ls_i[i], k=K_WALL, d0=Ls_i[i])
-                dx0 = positions[i].x - initial_positions[i].x
-                dy0 = positions[i].y - initial_positions[i].y
-                mdists.append(dx0 ** 2 + dy0 ** 2)
+            for _i, _p in enumerate(positions):
+                px_buf[_i] = _p.x
+                py_buf[_i] = _p.y
+            psi_buf[:] = psis
 
-                for j in range(i + 1, n):
-                    dx   = positions[i].x - positions[j].x
-                    dy   = positions[i].y - positions[j].y
-                    dPsi = wrap_pi(psis[j] - psis[i])
-                    acts = actuationimpactCalculation(
-                        smarticles[i].omega1, smarticles[i].omega2,
-                        smarticles[i].A1,     smarticles[i].A2)
-                    inter = actutaionDetermination(dx, dy, dPsi, acts[0], acts[1])
+            # ── Wall coupling (was the outer half of the pair loop) ─────────
+            # float_power (not **2) to match pymunk's Vec2d.length, which is
+            # math.sqrt(x**2 + y**2) on Python floats -- see analysis.py.
+            _rw   = np.sqrt(np.float_power(px_buf - cx_c, 2.0)
+                            + np.float_power(py_buf - cy_c, 2.0))
+            _dgap = INNER_R - _rw
+            A_wall[:] = K_WALL * sigmoid((Ls_i - _dgap) / (Ls_i + 1e-9))
 
-                    dx_matrix[i][j]  =  dx;  dx_matrix[j][i]  = -dx
-                    dy_matrix[i][j]  =  dy;  dy_matrix[j][i]  = -dy
-                    dPsi_matrix[i][j] =  dPsi; dPsi_matrix[j][i] = -dPsi
-                    dxy = math.sqrt(dx * dx + dy * dy)
-                    dxy_matrix[i][j] = dxy_matrix[j][i] = dxy
-                    # Per-pair geometry (symmetric averages of the two bodies).
-                    # Homogeneous run -> Ls_ij=L_s, L_ij=L, R0_ij=R0 (identical
-                    # to the original constants).
-                    Ls_ij = 0.5 * (Ls_i[i]   + Ls_i[j])
-                    L_ij  = 0.5 * (Lw_i[i]    + Lw_i[j])
-                    R0_ij = Ls_ij + 0.01 * (0.5 * (Smain_i[i] + Smain_i[j]))
-                    Aij_matrix[i][j] = Aij_matrix[j][i] = (
-                        L_ij ** 2 / (dx ** 2 + dy ** 2) * (
-                            (a0 + a1 * inter) * (np.sin(dPsi / 2) ** 2 + g0)
-                            + WC * sigmoid((R0_ij - dxy) / Ls_ij)))
+            _dx0   = px_buf - ipx
+            _dy0   = py_buf - ipy
+            mdists = np.float_power(_dx0, 2.0) + np.float_power(_dy0, 2.0)
+
+            # ── Pair coupling: same formula, evaluated in NumPy ─────────────
+            (dx_matrix, dy_matrix, dPsi_matrix,
+             dxy_matrix, Aij_matrix) = build_pair_matrices(
+                px_buf, py_buf, psi_buf, acts0_i, acts1_i,
+                Ls_i, Lw_i, Smain_i, a0, a1, g0, WC)
 
             IMPACT = Aij_matrix.sum(axis=1) / (n - 1) + W_WALL * A_wall
             IMPACTS.append(IMPACT)
             _, gr = compute_gr(dxy_matrix)
             GRs.append(gr)
-            # POS_ALL.append(np.array([(p.x, p.y) for p in positions], dtype=np.float32))
-            POS_ALL.append(np.array([(p.x, p.y, wrap_pi(s.main_body.angle)) 
-                          for p, s in zip(positions, smarticles)], dtype=np.float32))
+            # Same values as the previous list-of-tuples comprehension
+            # (wrap_pi is elementwise, float32 cast is unchanged).
+            _wpsi = wrap_pi(psi_buf)
+            POS_ALL.append(
+                np.stack((px_buf, py_buf, _wpsi), axis=1).astype(np.float32))
 
-            psis_arr = np.array([wrap_pi(s.main_body.angle) for s in smarticles])
+            psis_arr = _wpsi
             sys_ord, sys_ord_abs = calculate_orientational_order(psis_arr)
+            # calculate_orientational_order(row) == (|mean(exp(1j*row))|,
+            # |mean(exp(2j*row))|).  numpy's elementwise exp is chunk-invariant
+            # (verified: exp(1j*M)[i] is bit-identical to exp(1j*M[i]) ), so the
+            # two exponentials are hoisted to a single whole-matrix call.  The
+            # per-row np.mean and the sequential accumulation below are kept
+            # exactly as they were -- reductions are NOT chunk-invariant.
+            _E1 = np.exp(1j * dPsi_matrix)
+            _E2 = np.exp(1j * 2.0 * dPsi_matrix)
             sys_diff = sys_diff_abs = 0.0
             for i in range(n):
-                d, d_abs        = calculate_orientational_order(dPsi_matrix[i])
-                sys_diff       += d
-                sys_diff_abs   += d_abs
+                sys_diff       += np.abs(np.mean(_E1[i]))
+                sys_diff_abs   += np.abs(np.mean(_E2[i]))
             sys_diff     /= (n - 1)
             sys_diff_abs /= (n - 1)
 
@@ -435,13 +470,15 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
             ROT_ORDS.append(rot_ord)
             time_hist.append(t)
 
-            if record_this:
+            # Only frames that are actually encoded need to be drawn.  The
+            # previous code rendered every frame and then threw away
+            # (VIDEO_STRIDE - 1) of them; the resulting video is identical.
+            if record_this and frame_i % _vstride == 0:
                 orig_surf.fill((255, 255, 255))
                 space.debug_draw(draw_options_orig)
                 _blit_phase_markers(orig_surf)
                 _blit_id_labels(orig_surf)
-                if frame_i % max(1, VIDEO_STRIDE) == 0:
-                    recorder_orig.add_frame_from_surface(orig_surf)
+                recorder_orig.add_frame_from_surface(orig_surf)
             frame_i += 1
 
         if t >= MAX_RUNTIME and jam_time is None:
@@ -481,21 +518,37 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     if IMPACTS:
         impacts_arr = np.array(IMPACTS)
         with open(prefix + "_impacts.csv", "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["time"] + [f"s{i+1}" for i in range(len(smarticles))])
+            # Byte-for-byte the same as the csv.writer version (no field needs
+            # quoting and csv's default line terminator is CRLF), but written
+            # in large blocks instead of one call per row.
             nrows = len(IMPACTS)
             times = time_hist[-nrows:] if len(time_hist) >= nrows else time_hist
+            f.write("time," + ",".join(f"s{i+1}" for i in range(len(smarticles)))
+                    + "\r\n")
+            _chunk = []
             for ti, row in zip(times, impacts_arr):
-                w.writerow([f"{ti:.6f}"] + [f"{float(x):.6f}" for x in row])
+                _chunk.append(f"{ti:.6f}," +
+                              ",".join(f"{float(x):.6f}" for x in row) + "\r\n")
+                if len(_chunk) >= 512:
+                    f.write("".join(_chunk)); _chunk.clear()
+            if _chunk:
+                f.write("".join(_chunk))
 
     if POS_ALL:
         with open(prefix + "_POS_ALL.csv", "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["Step", "Agent_ID", "X", "Y", "Theta"])
+            # Identical bytes to the csv.writer version (CRLF terminator, no
+            # quoting needed), but this file has frames x n rows -- 360k rows at
+            # n = 100 -- so per-row csv.writer overhead was significant.
+            f.write("Step,Agent_ID,X,Y,Theta\r\n")
+            _chunk = []
             for step_idx, frame in enumerate(POS_ALL):
                 for agent_id, row in enumerate(frame):
-                    w.writerow([step_idx, agent_id + 1,
-                                f"{row[0]:.4f}", f"{row[1]:.4f}", f"{row[2]:.4f}"])
+                    _chunk.append(f"{step_idx},{agent_id + 1},"
+                                  f"{row[0]:.4f},{row[1]:.4f},{row[2]:.4f}\r\n")
+                if len(_chunk) >= 20000:
+                    f.write("".join(_chunk)); _chunk.clear()
+            if _chunk:
+                f.write("".join(_chunk))
         # ── Compute alignment time series ───────────────────────
         try:
             align_df = process_pos_all(prefix + "_POS_ALL.csv", max_dist=150.0)
@@ -544,7 +597,7 @@ def save_config_snapshot(out_dir: str):
 # =============================================================================
 
 def main():
-    WORKERS   = 1                          # >1 for parallel trials
+    WORKERS   = PARALLEL_WORKERS           # >1 for parallel trials (config.py)
     PREVIEW   = False
     INIT_FILE = "init_conditions/init_conditions_200_H.json"
     #INIT_FILE = os.path.join("init_conditions", EXP_NAME + ".json")
@@ -639,7 +692,7 @@ def main():
                         run_trial, trial_id=tid, seed=seed, preview=PREVIEW,
                         video_dir=VIDEO_DIR, out_dir=out_dir,
                         actuations=actuations, ALL_INIT=ALL_INIT,
-                        init_idx=idx_seq[tid]))
+                        use_preset=USE_PRESET, init_idx=idx_seq[tid]))
                 completed = 0
                 for fut in as_completed(futures):
                     try:

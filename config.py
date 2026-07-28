@@ -39,19 +39,37 @@ WARMUP_STEPS        = 180
 # every smarticle's warm-up counter has finished.
 RECORD_AFTER_WARMUP = True
 
-# ── Screen / geometry ─────────────────────────────────────────────────────────
-W, H              = 900, 760   # screen size (pixels)
-SCREEN_MARGIN     = 26         # margin between outer wall and window edge
+# ── Experiment size ───────────────────────────────────────────────────────────
+N_SMARTICLES      = 17         # number of smarticles in the simulation
 
 # ── Reference geometry (used for auto-scaling) ────────────────────────────────
-BASE_N_REF        = 17
+BASE_N_REF        = 17         # population the reference arena was tuned for
 BASE_WALL_THICK   = 20
 BASE_MAIN_LEN, BASE_MAIN_W = 70, 41
 BASE_ARM_LEN,  BASE_ARM_W  = 70, 6
 
-# ── Experiment size ───────────────────────────────────────────────────────────
-N_SMARTICLES      = 17         # number of smarticles in the simulation
-INNER_R_UNSCALED  = 245        # inner ring radius before scaling
+# ── Population scaling ────────────────────────────────────────────────────────
+# Robot size is fixed, so putting N robots in the BASE_N_REF arena changes the
+# areal packing fraction as N/R^2.  With AUTO_SCALE_ARENA the arena (and the
+# window it is drawn in) grows as sqrt(N / BASE_N_REF), which holds the packing
+# fraction — and therefore the collective regime — constant as N grows.
+#
+#   N = 17  -> factor 1.0 exactly  -> every derived value below is UNCHANGED.
+#   N = 100 -> factor ~2.43        -> INNER_R 245 -> 594 px, window 2182x1843.
+#
+# Set to False to keep the fixed 900x760 / R=245 arena regardless of N (which
+# is only sensible for small N: 100 robots do not physically fit in R=245).
+AUTO_SCALE_ARENA  = True
+_POP_SCALE        = (max(1.0, math.sqrt(N_SMARTICLES / BASE_N_REF))
+                     if AUTO_SCALE_ARENA else 1.0)
+
+# ── Screen / geometry ─────────────────────────────────────────────────────────
+BASE_W, BASE_H    = 900, 760   # reference screen size (pixels) at BASE_N_REF
+W, H              = int(round(BASE_W * _POP_SCALE)), int(round(BASE_H * _POP_SCALE))
+SCREEN_MARGIN     = 26         # margin between outer wall and window edge
+
+BASE_INNER_R_UNSCALED = 245    # inner ring radius at BASE_N_REF, before scaling
+INNER_R_UNSCALED  = BASE_INNER_R_UNSCALED * _POP_SCALE
 
 # ── Auto-scaling (do not edit unless you know what you are doing) ─────────────
 _outer_need       = INNER_R_UNSCALED + BASE_WALL_THICK
@@ -94,7 +112,7 @@ BODY_TYPES = {
 # Per-robot assignment; length MUST equal N_SMARTICLES. Each entry is a key of
 # BODY_TYPES. Example for a 17-robot mixed population:
 #   BODY_ASSIGNMENT = (["long_arm"] * 6) + (["short_arm"] * 6) + (["default"] * 5)
-BODY_ASSIGNMENT = ["default"] * 17
+BODY_ASSIGNMENT = ["default"] * N_SMARTICLES
 random.shuffle(BODY_ASSIGNMENT)
 
 # Per-robot command array; length must equal N_SMARTICLES.
@@ -107,7 +125,12 @@ random.shuffle(BODY_ASSIGNMENT)
 # Example: -226 → antiphase, |phase|=pi/2, A=pi/6, f=3Hz
 #          +051 → same phase, phase=random, A=pi*5/12, f=0.5Hz
 #COMMAND_ARRAY = [862] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
-COMMAND_ARRAY = [862] * 9 + [462] * 8
+# Two-population mix, expressed as a fraction so it follows N_SMARTICLES.
+# At N_SMARTICLES = 17 this is exactly [862] * 9 + [462] * 8 as before.
+_CMD_A, _CMD_B    = 862, 462
+_CMD_A_FRACTION   = 9 / 17
+_n_cmd_a          = int(round(N_SMARTICLES * _CMD_A_FRACTION))
+COMMAND_ARRAY = [_CMD_A] * _n_cmd_a + [_CMD_B] * (N_SMARTICLES - _n_cmd_a)
 random.shuffle(COMMAND_ARRAY)
 
 # GAIT_BY_TYPE will be automatically chosen when heterogeneous is enabled
@@ -132,10 +155,32 @@ GAIT_BY_TYPE = {
 #                        hinge joints — a deformable loop the swarm can reshape.
 RING_MOVABLE   = True        # False = fixed (default); True = movable
 RING_SHAPE     = "polygon"     # "circle" (default) | "polygon"
-RING_N_SIDES   = 35            # number of sides when RING_SHAPE == "polygon" (>= 3)
-# Total mass of a MOVABLE ring, distributed over its segments / edge-links.
+
+# --- Ring scaling with population -------------------------------------------
+# Both knobs are exactly 1.0 at N_SMARTICLES == BASE_N_REF, so the reference
+# experiment is untouched; they only matter once the arena grows.
+#
+# Sides: with a fixed side count a bigger ring means longer edges, so the wall
+# would be geometrically *coarser* relative to a robot at large N (edge length
+# 44 px at N=17 vs 106 px at N=100).  Scaling the count with the radius keeps
+# the edge length — and hence what a robot "sees" locally — constant.
+RING_N_SIDES_BASE     = 35
+AUTO_SCALE_RING_SIDES = True
+RING_N_SIDES   = (int(round(RING_N_SIDES_BASE * _POP_SCALE))
+                  if AUTO_SCALE_RING_SIDES else RING_N_SIDES_BASE)
+
+# Mass: a MOVABLE ring is pushed by the swarm, so what determines the regime is
+# the ring-mass : swarm-mass ratio (0.34 at the reference settings).  Holding
+# RING_MASS fixed while N grows makes the boundary ~N times easier to shove,
+# which is a different experiment.  Scaling by _POP_SCALE**2 (== N/BASE_N_REF)
+# preserves the ratio.
+#   *** This is a physics judgement call -- see notes.  Set to False to keep the
+#   *** old constant mass, or use _POP_SCALE (hoop of fixed linear density).
 # Ignored when RING_MOVABLE is False.  Heavier = harder for the swarm to shove.
-RING_MASS      = 1000.0 * (SCALE ** 2)
+BASE_RING_MASS        = 1000.0
+AUTO_SCALE_RING_MASS  = True
+RING_MASS      = (BASE_RING_MASS * (SCALE ** 2)
+                  * ((_POP_SCALE ** 2) if AUTO_SCALE_RING_MASS else 1.0))
 # Number of color bands painted around the ring, for observing rotation/translation.
 # None or 0  →  no special coloring (pymunk default gray/blue).
 # Positive N  →  divide the ring into N equal angular bands, each a distinct
@@ -197,6 +242,16 @@ V_MAX             = 900.0 * SCALE
 W_MAX             = 35.0
 
 # ── Spawn / packing ───────────────────────────────────────────────────────────
+# Layout used by spawn_smarticles_auto() (GetSpawnPositions.py and the
+# ALREADY_SPWANED = False path).
+#   "legacy" : the original 8-outer-ring + 1-inner-ring geometric layout.
+#              It only has two rings, so it cannot place more than ~20 robots
+#              without piling the remainder onto a single small circle.
+#   "rings"  : Vogel (sunflower) placement — near-uniform density at any N, and
+#              with AUTO_SCALE_ARENA the neighbour spacing is N-independent.
+#   "auto"   : "legacy" for N <= BASE_N_REF, "rings" above it.  Default, and
+#              bit-identical to the old behaviour at the reference population.
+SPAWN_LAYOUT      = "auto"
 PEN_EPS           = 0.1 * SCALE
 SETTLE_STEPS      = 10
 SETTLE_DT         = 1 / 800.0
@@ -218,6 +273,25 @@ STRAIGHT_BAND_DEG = 12.0
 SIM_DT              = 1.0 / 180.0
 RENDER_FPS_PREVIEW  = 60
 RENDER_FPS_HEADLESS = 60
+
+# ── Performance / scale-out ───────────────────────────────────────────────────
+# Number of trials run concurrently in simulation.main().  1 = the original
+# serial behaviour.  Each worker is a separate process with its own physics
+# space, so this scales trial throughput (not the speed of a single trial).
+PARALLEL_WORKERS  = 1
+
+# Encode the video at 1/VIDEO_DOWNSCALE resolution.
+#   "auto" : 1 at N <= BASE_N_REF (unchanged), then follows the arena growth so
+#            the encoded frame stays roughly the reference 900x760 regardless of
+#            N.  Without this, N=100 writes 2183x1843 frames -- video encoding
+#            becomes ~60% of the runtime and a single 60 s trial produces a
+#            ~560 MB .mp4.
+#   integer: fixed factor (1 = full resolution).
+VIDEO_DOWNSCALE   = "auto"
+_VIDEO_DOWNSCALE_RAW = VIDEO_DOWNSCALE
+VIDEO_DOWNSCALE   = (max(1, int(round(_POP_SCALE)))
+                     if str(_VIDEO_DOWNSCALE_RAW).lower() == "auto"
+                     else max(1, int(_VIDEO_DOWNSCALE_RAW)))
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 SCORE_VALID         = False

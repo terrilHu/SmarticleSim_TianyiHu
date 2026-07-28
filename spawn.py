@@ -10,6 +10,7 @@ import random
 import pymunk
 
 from config import (
+    BASE_N_REF, N_SMARTICLES, SPAWN_LAYOUT,
     MAIN_LEN, MAIN_W, ARM_LEN,
     PEN_EPS, SETTLE_STEPS, SETTLE_DT,
     MAX_MOTOR_TORQUE_NOM,
@@ -217,6 +218,70 @@ def spawn_smarticles(space: pymunk.Space, center: pymunk.Vec2d,
 
     relax_system(space, steps=600)
     return smarts
+
+
+def spawn_smarticles_rings(space: pymunk.Space, center: pymunk.Vec2d,
+                           inner_r: float, n: int,
+                           fill: float = 0.86) -> list:
+    """
+    Vogel / sunflower placement, then the same physics relax as
+    :func:`spawn_smarticles`.
+
+    ``spawn_smarticles`` lays robots on exactly two circles (8 outside, the
+    rest on one small inner circle), which is fine for ~17 robots but piles
+    every extra robot onto the same inner ring — at n = 100 that is ~92 bodies
+    on one circle, and the relax pass cannot untangle it.
+
+    The sunflower spiral
+
+        r_k = R * sqrt((k + 0.5) / n),   theta_k = k * golden_angle
+
+    gives near-uniform areal density for any n, so the nearest-neighbour
+    spacing is ~ R * sqrt(pi / n).  Combined with AUTO_SCALE_ARENA (R grows as
+    sqrt(n)) that spacing is independent of n, i.e. the packing seen by the
+    relax pass at n = 100 is the same as the one it handled at n = 17.
+    """
+    golden = math.pi * (3.0 - math.sqrt(5.0))
+    r_max  = inner_r * fill
+    smarts = []
+
+    for i in range(n):
+        r     = r_max * math.sqrt((i + 0.5) / n)
+        angle = i * golden + random.uniform(-0.05, 0.05)
+        r    += random.uniform(-0.01, 0.01) * inner_r
+
+        target_pos = center + pymunk.Vec2d(r * math.cos(angle), r * math.sin(angle))
+        heading    = angle + math.pi / 2 + random.choice([0, math.pi]) + random.uniform(-0.2, 0.2)
+
+        sm     = Smarticle3Link(space, **resolve_body_params(i))
+        offset = target_pos - sm.main_body.position
+        sm.main_body.position  += offset
+        sm.left_body.position  += offset
+        sm.right_body.position += offset
+        sm.main_body.angle      = heading
+
+        fold = random.uniform(-math.pi / 6, math.pi / 6)
+        sm.left_body.angle  = heading + fold
+        sm.right_body.angle = heading - fold
+        smarts.append(sm)
+
+    relax_system(space, steps=600)
+    return smarts
+
+
+def spawn_smarticles_auto(space: pymunk.Space, center: pymunk.Vec2d,
+                          inner_r: float, n: int) -> list:
+    """
+    Dispatch to the layout selected by ``config.SPAWN_LAYOUT``.
+
+    With the default "auto" and n <= BASE_N_REF this calls
+    :func:`spawn_smarticles` directly, so the sequence of RNG draws — and
+    therefore the produced layout — is unchanged.
+    """
+    mode = (SPAWN_LAYOUT or "auto").lower()
+    if mode == "legacy" or (mode == "auto" and n <= BASE_N_REF):
+        return spawn_smarticles(space, center, inner_r, n)
+    return spawn_smarticles_rings(space, center, inner_r, n)
 
 
 def spawn_smarticles_norelax(space: pymunk.Space, center: pymunk.Vec2d,

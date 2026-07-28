@@ -511,11 +511,24 @@ class Smarticle3Link:
         """
         PD motor controller.  During warm-up, linearly interpolates the target
         angle from the spawn pose to the nominal trajectory.
-        """
-        th1_des, dth1_des, th2_des, dth2_des = self.desired_theta(t)
 
-        th1_rel = wrap_pi(self.left_body.angle  - self.main_body.angle)
-        th2_rel = wrap_pi(self.right_body.angle - self.main_body.angle)
+        Hot path: called n times per physics step (n * 180 times per simulated
+        second), so attribute lookups are bound to locals, desired_theta() is
+        inlined, and main_body.angle is read once instead of twice.  Every
+        floating-point operation and its ordering is unchanged.
+        """
+        A1, A2 = self.A1, self.A2
+        w1, w2 = self.omega1, self.omega2
+        u1 = w1 * t + self.phase1
+        u2 = w2 * t + self.phase2
+        th1_des  = A1 * math.sin(u1)
+        th2_des  = A2 * math.sin(u2)
+        dth1_des = A1 * w1 * math.cos(u1)
+        dth2_des = A2 * w2 * math.cos(u2)
+
+        main_ang = self.main_body.angle
+        th1_rel = wrap_pi(self.left_body.angle  - main_ang)
+        th2_rel = wrap_pi(self.right_body.angle - main_ang)
 
         # ── Warm-up ramp ──────────────────────────────────────────────────────
         # if self._warmup_step < self.warmup_steps:

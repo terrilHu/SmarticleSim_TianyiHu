@@ -14,7 +14,7 @@ from config import (INNER_R, WALL_THICK, N_SMARTICLES, TRIAL_SEED_BASE,
                     MAIN_LEN, MAIN_W, ARM_LEN, ARM_W, W, H,
                     COMMAND_ARRAY, RING_SHAPE, RING_N_SIDES)
 from smarticle import Smarticle3Link, add_ring
-from spawn import (spawn_smarticles, spawn_smarticles_norelax,
+from spawn import (spawn_smarticles, spawn_smarticles_auto, spawn_smarticles_norelax,
                    any_penetration, inside_ring, build_from_initial_conditions)
 from naming import generate_trial_name
 
@@ -142,7 +142,7 @@ def generate_all_initial_conditions():
                  movable=False, shape=RING_SHAPE, n_sides=RING_N_SIDES)
 
         # ── Spawn smarticles ──────────────────────────────
-        smarts = spawn_smarticles(space, center, EFF_INNER_R, N_SMARTICLES)
+        smarts = spawn_smarticles_auto(space, center, EFF_INNER_R, N_SMARTICLES)
 
         # ==============================================================
         # Save a snapshot image regardless of whether spawning succeeded or failed
