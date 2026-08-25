@@ -365,6 +365,14 @@ class Smarticle3Link:
         self.space = space
         self.kp    = float(kp)
 
+        # ── Identity ──────────────────────────────────────────────────────────
+        # Assigned by run_trial right after spawn (id == index in `smarticles`,
+        # which is what the video labels and every CSV already assume).  Left
+        # None here because spawn.py builds throwaway candidates during
+        # rejection sampling that never get an id.
+        self.id   = None
+        self.gait = None   # -> gait.GaitState, set by gait.GaitController
+
         # ── Physical geometry (per-individual; read by the coupling model
         #    in simulation.py and persisted to the initial-conditions JSON) ────
         self.main_len  = main_len

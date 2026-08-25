@@ -12,8 +12,8 @@ import random
 
 # ── Trial / seed ──────────────────────────────────────────────────────────────
 TRIAL_SEED_BASE   = 12345
-N_TRIALS_GLOBAL   = 3       # 0 means auto-read from initial-conditions file
-MAX_RUNTIME       = 120.0    # in seconds
+N_TRIALS_GLOBAL   = 1       # 0 means auto-read from initial-conditions file
+MAX_RUNTIME       = 30.0    # in seconds
 
 # ── Initial-condition selection (only used when ALREADY_SPWANED = True) ────
 # "sequential" : use init_conditions[0], [1], [2] ... in order (default)
@@ -24,7 +24,7 @@ MAX_RUNTIME       = 120.0    # in seconds
 #                order (repeats allowed, e.g. to re-run the same IC with
 #                different seeds).  N_TRIALS is IGNORED in this mode -- the
 #                trial count is len(INIT_INDICES).
-INIT_SELECTION    = "explicit"
+INIT_SELECTION    = "random"
 
 # Only read when INIT_SELECTION == "explicit".  0-based indices into the
 # loaded initial-conditions file (same numbering as "IC#" in the console log
@@ -145,12 +145,77 @@ _n_cmd_a          = int(round(N_SMARTICLES * _CMD_A_FRACTION))
 COMMAND_ARRAY = [_CMD_A] * _n_cmd_a + [_CMD_B] * (N_SMARTICLES - _n_cmd_a)
 random.shuffle(COMMAND_ARRAY)
 
+# The same array can be written in the debug shorthand instead (see gait.py for
+# the full syntax).  Uncomment to use -- note this is deterministic, i.e. by id
+# rather than shuffled:
+#   from gait import build_command_array
+#   COMMAND_ARRAY = build_command_array("a462; 0..8862", N_SMARTICLES)
+
 # GAIT_BY_TYPE will be automatically chosen when heterogeneous is enabled
 GAIT_BY_TYPE = {
-    "default":    -851,    
-    "long_arm":  -426,   
-    "short_arm":  861,   
+    "default":    -851,
+    "long_arm":  -426,
+    "short_arm":  861,
 }
+
+# ── Runtime gait control (mid-simulation motion-pattern changes) ──────────────
+# Every robot gets an explicit id (0 .. N-1, matching its index in the
+# `smarticles` list and the id-1 shown in the videos) and its own tracked gait
+# state (gait.GaitState, reachable as smarticle.gait).  With the switch below
+# enabled, a user callback is polled during the run and may change any robot's
+# motion pattern individually, addressed by id.
+#
+# When ENABLE_RUNTIME_GAIT_CONTROL is False the callback is never resolved or
+# called and results are bit-for-bit identical to a run without this feature.
+ENABLE_RUNTIME_GAIT_CONTROL = True
+
+# "module:function" (a string, so save_config_snapshot() can record it and so
+# config stays free of imports).  See gait_control.py for the contract and
+# ready-made examples:
+#   "gait_control:script"            replay RUNTIME_GAIT_SCRIPT below (no code)
+#   "gait_control:example_text"      the debug string syntax written inline
+#   "gait_control:example_schedule"  fixed timetable, dict form
+#   "gait_control:example_closed_loop"  react to where robots have drifted
+#   "gait_control:example_stagger"   convert the swarm one robot at a time
+RUNTIME_GAIT_CONTROLLER  = "gait_control:example_schedule"
+
+# Time-driven debug script, used when RUNTIME_GAIT_CONTROLLER is
+# "gait_control:script".  Each entry is (seconds, "command text") in the same
+# shorthand you would type at the real hardware -- "a-862" means ALL robots
+# switch to -862.  There is no separator: the target expression is followed
+# directly by the signed command.  Full syntax table at the top of gait.py;
+# in brief:
+#
+#   a / all / *   every robot        3,7,12   those three
+#   even / odd    by id parity       0..4     robots 0 through 4 (also 0:4)
+#   a,~3          all except 3       (none)   a bare command means "a"
+#   ;             separates clauses; a later clause wins where they overlap
+#
+# "a-862" -> all to -862      "a862" -> all to +862      "7-862" -> robot 7
+#
+RUNTIME_GAIT_SCRIPT = [
+    # ( 5.0, "a-862"),          # at t=5s every robot switches to -862
+    # (10.0, "0..4851"),        # at t=10s robots 0-4 go to 851
+    # (15.0, "3,7,12=461"),     # '=' optional, purely for readability
+]
+
+# Print one line per applied switch (time, robot id, old -> new, decoded
+# frequency / amplitude / phase).  Switches are queued to the robot's next zero
+# phase, so the logged time is later than the requested one -- by design.
+# Robots switching together on the same step are collapsed onto one line.
+RUNTIME_GAIT_VERBOSE = False
+
+# Poll the callback every N rendered frames (1 = every frame, i.e. 60 Hz of
+# simulated time).  Raise it if the callback is expensive.
+RUNTIME_GAIT_POLL_EVERY  = 1
+
+# How a queued change takes effect:
+#   "zero_phase" : wait for that robot's next zero phase, then switch with the
+#                  commanded joint angle continuous (no PD kick).  The X digit
+#                  of a runtime command is ignored -- see gait.py.
+#   "immediate"  : rewrite the parameters on the spot, honouring the X digit.
+#                  Produces a step in the commanded angle; for control runs.
+RUNTIME_GAIT_SWITCH_MODE = "zero_phase"
 
 # ── Ring (confining boundary) options ─────────────────────────────────────────
 # The boundary can be FIXED (anchored to the world) or MOVABLE (free to move),

@@ -18,6 +18,11 @@ import pygame
 import pymunk
 import pymunk.pygame_util
 
+# The runtime-gait switches below are read through `cfg.` at call time, never
+# imported by value: `from config import X` binds once at import, which is why
+# sweep.py has to patch both config.COMMAND_ARRAY and simulation.COMMAND_ARRAY.
+# Reading them off the module (as bodies.py does) makes them patchable.
+import config as cfg
 from config import (
     # experiment
     ALREADY_SPWANED, N_SMARTICLES, TRIAL_SEED_BASE, N_TRIALS_GLOBAL,
@@ -54,7 +59,8 @@ from pos_all_alignment import process_pos_all
 
 from naming import generate_trial_name
 
-from bodies import gait_for_smarticle
+import gait
+from gait import GaitController, resolve_callback
 
 # =============================================================================
 # Utilities
@@ -234,6 +240,13 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     else:
         smarticles = spawn_smarticles_auto(space, center, eff_inner_r, N_SMARTICLES)
 
+    # ── Robot ids ─────────────────────────────────────────────────────────────
+    # The list index has always been the de-facto robot id (video labels, CSV
+    # Agent_ID, COMMAND_ARRAY, BODY_ASSIGNMENT all key off it); make it explicit
+    # so the runtime gait controller can be addressed by number.
+    for _i, _s in enumerate(smarticles):
+        _s.id = _i
+
     initial_positions = [s.main_body.position for s in smarticles]
 
     # ── Interactive command input (use_preset=False) ──────────────────────────
@@ -247,42 +260,43 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
             pygame.init()
 
     # ── Decode active_commands and apply per-robot parameters ─────────────────
-    _PHASE_TABLE = [
-        math.pi/4, math.pi/2, math.pi*3/4, math.pi,
-        math.pi*5/4, math.pi*3/2, math.pi*7/4, 2*math.pi,
-    ]
-    _AMPLI_TABLE = [
-        math.pi/12, math.pi/6, math.pi/4,
-        math.pi/3,  math.pi*5/12, math.pi/2,
-    ]
-    _FREQ_TABLE  = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+    # GaitController's constructor performs exactly the decode loop that used
+    # to be inlined here (same order, same bodies.gait_for_smarticle override,
+    # same single random.random() draw per x == 0 robot), and additionally
+    # keeps a GaitState per robot id so the motion pattern can be tracked -- and
+    # changed -- individually during the run.
+    #
+    # Marker color encodes the INITIAL PHASE. If x is 1-8 the phase is one of
+    # the 8 discrete table values; if x == 0 the phase is random, so we color by
+    # the actual sampled ph1. Mapping phase in [0, 2pi) to an HSV hue
+    # distinguishes the 8 discrete bins and also handles random phases.
+    runtime_gait_on = bool(getattr(cfg, "ENABLE_RUNTIME_GAIT_CONTROL", False))
+    gait_callback   = None
+    if runtime_gait_on:
+        try:
+            gait_callback = resolve_callback(
+                getattr(cfg, "RUNTIME_GAIT_CONTROLLER", None))
+        except Exception as e:
+            print(f"[Trial {trial_id}] Could not load RUNTIME_GAIT_CONTROLLER "
+                  f"({e!r}); runtime gait control disabled for this trial.")
+        if gait_callback is None:
+            runtime_gait_on = False
 
-    for i, s in enumerate(smarticles):
-        #cmd      = active_commands[i]
-        override = gait_for_smarticle(s)
-        cmd = override if override is not None else active_commands[i]
-        sign     = -1 if cmd < 0 else 1
-        abs_cmd  = abs(cmd)
-        z        = abs_cmd % 10
-        y        = (abs_cmd % 100 - z) // 10
-        x        = abs_cmd // 100
-        freq_hz  = _FREQ_TABLE[z - 1]  if 1 <= z <= 9 else 0.5
-        ampli    = _AMPLI_TABLE[y - 1] if 1 <= y <= 6 else math.pi/4
-        ph1      = random.random() * 2 * math.pi if x == 0 else _PHASE_TABLE[x - 1]
-        ph2      = ph1 + math.pi if sign < 0 else ph1
-        s.omega1 = freq_hz * 2 * math.pi
-        s.omega2 = freq_hz * 2 * math.pi
-        s.A1     = ampli
-        s.A2     = ampli
-        s.phase1 = ph1
-        s.phase2 = ph2
-        # Marker color encodes the INITIAL PHASE. If x is 1-8 the phase is one
-        # of the 8 discrete table values; if x == 0 the phase is random, so we
-        # color by the actual sampled ph1. Mapping phase in [0, 2pi) to an HSV
-        # hue distinguishes the 8 discrete bins and also handles random phases.
-        s.phase_marker_color = _phase_to_color(ph1)
-        s.warmup_steps = WARMUP_STEPS
-        s._warmup_step = 0
+    gait_ctl = GaitController(
+        smarticles, active_commands,
+        warmup_steps=WARMUP_STEPS,
+        phase_color_fn=_phase_to_color,
+        switch_mode=getattr(cfg, "RUNTIME_GAIT_SWITCH_MODE", "zero_phase"),
+        callback=gait_callback,
+        verbose=runtime_gait_on and bool(
+            getattr(cfg, "RUNTIME_GAIT_VERBOSE", False)),
+        center=(float(center.x), float(center.y)),
+        ctx={"trial_id": trial_id, "n": len(smarticles),
+             "center": (float(center.x), float(center.y)),
+             "inner_r": INNER_R, "dt": 1.0 / 180.0,
+             "max_runtime": MAX_RUNTIME},
+    )
+    gait_poll_every = max(1, int(getattr(cfg, "RUNTIME_GAIT_POLL_EVERY", 1)))
 
     # ── Initial impulses ──────────────────────────────────────────────────────
     for s in smarticles:
@@ -308,9 +322,9 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
         return pair
 
     def _blit_id_labels(dst):
-        for idx, ss in enumerate(smarticles):
+        for ss in smarticles:
             cx, cy = int(ss.main_body.position.x), int(ss.main_body.position.y)
-            surf_w, surf_s = _label_surfaces(str(idx + 1))
+            surf_w, surf_s = _label_surfaces(str(ss.id + 1))
             tw, th = surf_w.get_size()
             # blit at top-left = center - half-size so the text is centred on (cx, cy)
             lx, ly = cx - tw // 2, cy - th // 2
@@ -340,6 +354,7 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     t          = 0.0
     dt         = 1.0 / 180.0
     frame_i    = 0
+    poll_i     = 0     # frame boundaries seen, for RUNTIME_GAIT_POLL_EVERY
     # MAX_RUNTIME = 45.0
     W_WALL     = 2.0
     D0_WALL    = 1.0 * L_s
@@ -431,6 +446,19 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
                 rb.velocity         *= LIN_DAMP
                 rb.angular_velocity *= ANG_DAMP
 
+            # Queued motion-pattern changes take effect at the robot's own zero
+            # phase, which is resolved to a physics step -- not a frame -- so
+            # the commanded angle stays continuous.  With nothing queued (the
+            # default, and always when runtime control is off) this costs one
+            # attribute read per step.
+            if gait_ctl.has_pending:
+                for rid in gait_ctl.step(t):
+                    _s = smarticles[rid]
+                    # acts0_i / acts1_i cache actuationimpactCalculation() for
+                    # the whole trial; a new gait invalidates that robot's row.
+                    acts0_i[rid], acts1_i[rid] = actuationimpactCalculation(
+                        _s.omega1, _s.omega2, _s.A1, _s.A2)
+
             space.step(dt)
             t += dt
 
@@ -509,6 +537,17 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
                 _blit_id_labels(orig_surf)
                 recorder_orig.add_frame_from_surface(orig_surf)
             frame_i += 1
+
+        # ── Runtime gait control ──────────────────────────────────────────────
+        # Polled at the frame boundary, after data collection, so the callback
+        # sees exactly the state that was just recorded.  Whatever it asks for
+        # is queued and applied by gait_ctl.step() above.  Counted on its own
+        # (not frame_i, which is frozen during warm-up) so RUNTIME_GAIT_POLL_EVERY
+        # means the same thing before and after the ramp.
+        if runtime_gait_on:
+            if poll_i % gait_poll_every == 0:
+                gait_ctl.poll(t)
+            poll_i += 1
 
         if t >= MAX_RUNTIME and jam_time is None:
             jam_time = MAX_RUNTIME
@@ -629,7 +668,7 @@ def save_config_snapshot(out_dir: str):
 def main():
     WORKERS   = PARALLEL_WORKERS           # >1 for parallel trials (config.py)
     PREVIEW   = False
-    INIT_FILE = "init_conditions/init_conditions_200_N100.json"
+    INIT_FILE = "init_conditions/init_conditions_200.json"
     #INIT_FILE = os.path.join("init_conditions", EXP_NAME + ".json")
     N_TRIALS  = N_TRIALS_GLOBAL            # 0 = auto-read from init file
     USE_PRESET = True
@@ -637,10 +676,7 @@ def main():
     # ── Generate unified experiment name using naming module ────────────────────
     _cmd0  = COMMAND_ARRAY[0];  _abs0 = abs(_cmd0)
     _z0    = _abs0 % 10;        _y0   = (_abs0 % 100 - _z0) // 10;  _x0 = _abs0 // 100
-    _PTAB  = [math.pi/4, math.pi/2, math.pi*3/4, math.pi,
-              math.pi*5/4, math.pi*3/2, math.pi*7/4, 2*math.pi]
-    _ATAB  = [math.pi/12, math.pi/6, math.pi/4, math.pi/3, math.pi*5/12, math.pi/2]
-    _FTAB  = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+    _PTAB, _ATAB, _FTAB = gait.PHASE_TABLE, gait.AMPLI_TABLE, gait.FREQ_TABLE
     _ph0   = _PTAB[_x0 - 1] if 1 <= _x0 <= 8 else 0.0
     _om0   = (_FTAB[_z0 - 1] if 1 <= _z0 <= 9 else 0.5) * 2 * math.pi
     _am0   = math.degrees(_ATAB[_y0 - 1] if 1 <= _y0 <= 6 else math.pi/4)
