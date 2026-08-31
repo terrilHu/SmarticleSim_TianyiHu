@@ -12,8 +12,8 @@ import random
 
 # ── Trial / seed ──────────────────────────────────────────────────────────────
 TRIAL_SEED_BASE   = 12345
-N_TRIALS_GLOBAL   = 1       # 0 means auto-read from initial-conditions file
-MAX_RUNTIME       = 30.0    # in seconds
+N_TRIALS_GLOBAL   = 10       # 0 means auto-read from initial-conditions file
+MAX_RUNTIME       = 100.0    # in seconds
 
 # ── Initial-condition selection (only used when ALREADY_SPWANED = True) ────
 # "sequential" : use init_conditions[0], [1], [2] ... in order (default)
@@ -24,7 +24,7 @@ MAX_RUNTIME       = 30.0    # in seconds
 #                order (repeats allowed, e.g. to re-run the same IC with
 #                different seeds).  N_TRIALS is IGNORED in this mode -- the
 #                trial count is len(INIT_INDICES).
-INIT_SELECTION    = "random"
+INIT_SELECTION    = "explicit"
 
 # Only read when INIT_SELECTION == "explicit".  0-based indices into the
 # loaded initial-conditions file (same numbering as "IC#" in the console log
@@ -32,7 +32,7 @@ INIT_SELECTION    = "random"
 #   INIT_INDICES = [40]              # just IC#40, once
 #   INIT_INDICES = [40, 40, 40]      # IC#40, three times (e.g. different seeds)
 #   INIT_INDICES = list(range(50, 60))   # IC#50 .. IC#59
-INIT_INDICES      = [116, 87, 194]
+INIT_INDICES      = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]#[116, 87, 194]
 
 # ── Video recording ───────────────────────────────────────────────────────────
 RECORD_VIDEO      = True
@@ -52,7 +52,7 @@ WARMUP_STEPS        = 180
 RECORD_AFTER_WARMUP = True
 
 # ── Experiment size ───────────────────────────────────────────────────────────
-N_SMARTICLES      = 100         # number of smarticles in the simulation
+N_SMARTICLES      = 17         # number of smarticles in the simulation
 
 # ── Reference geometry (used for auto-scaling) ────────────────────────────────
 BASE_N_REF        = 17         # population the reference arena was tuned for
@@ -139,15 +139,13 @@ random.shuffle(BODY_ASSIGNMENT)
 #COMMAND_ARRAY = [862] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
 # Two-population mix, expressed as a fraction so it follows N_SMARTICLES.
 # At N_SMARTICLES = 17 this is exactly [862] * 9 + [462] * 8 as before.
-_CMD_A, _CMD_B    = 862, 462
+_CMD_A, _CMD_B    = 432, 832
 _CMD_A_FRACTION   = 0 / 17
 _n_cmd_a          = int(round(N_SMARTICLES * _CMD_A_FRACTION))
 COMMAND_ARRAY = [_CMD_A] * _n_cmd_a + [_CMD_B] * (N_SMARTICLES - _n_cmd_a)
 random.shuffle(COMMAND_ARRAY)
 
-# The same array can be written in the debug shorthand instead (see gait.py for
-# the full syntax).  Uncomment to use -- note this is deterministic, i.e. by id
-# rather than shuffled:
+# Or in the debug shorthand (gait.py), deterministic by id rather than shuffled:
 #   from gait import build_command_array
 #   COMMAND_ARRAY = build_command_array("a462; 0..8862", N_SMARTICLES)
 
@@ -158,64 +156,85 @@ GAIT_BY_TYPE = {
     "short_arm":  861,
 }
 
-# ── Runtime gait control (mid-simulation motion-pattern changes) ──────────────
-# Every robot gets an explicit id (0 .. N-1, matching its index in the
-# `smarticles` list and the id-1 shown in the videos) and its own tracked gait
-# state (gait.GaitState, reachable as smarticle.gait).  With the switch below
-# enabled, a user callback is polled during the run and may change any robot's
-# motion pattern individually, addressed by id.
-#
-# When ENABLE_RUNTIME_GAIT_CONTROL is False the callback is never resolved or
-# called and results are bit-for-bit identical to a run without this feature.
+# ── Runtime gait control ──────────────────────────────────────────────────────
+# Change any robot's motion pattern mid-run, addressed by id.  Reference lives
+# with the code: gait.py (command encoding + the "a-862" debug syntax),
+# gait_control.py (callback contract + ready-made controllers), strategy.py
+# (grouping/roles pipeline and its tuning notes).
+# False -> the callback is never resolved; results bit-identical to before.
 ENABLE_RUNTIME_GAIT_CONTROL = True
 
-# "module:function" (a string, so save_config_snapshot() can record it and so
-# config stays free of imports).  See gait_control.py for the contract and
-# ready-made examples:
-#   "gait_control:script"            replay RUNTIME_GAIT_SCRIPT below (no code)
-#   "gait_control:example_text"      the debug string syntax written inline
-#   "gait_control:example_schedule"  fixed timetable, dict form
-#   "gait_control:example_closed_loop"  react to where robots have drifted
-#   "gait_control:example_stagger"   convert the swarm one robot at a time
-RUNTIME_GAIT_CONTROLLER  = "gait_control:example_schedule"
+# "module:function".  See gait_control.py for what each one does:
+#   strategy | script | example_text | example_schedule
+#   example_closed_loop | example_stagger
+RUNTIME_GAIT_CONTROLLER  = "gait_control:strategy"
 
-# Time-driven debug script, used when RUNTIME_GAIT_CONTROLLER is
-# "gait_control:script".  Each entry is (seconds, "command text") in the same
-# shorthand you would type at the real hardware -- "a-862" means ALL robots
-# switch to -862.  There is no separator: the target expression is followed
-# directly by the signed command.  Full syntax table at the top of gait.py;
-# in brief:
-#
-#   a / all / *   every robot        3,7,12   those three
-#   even / odd    by id parity       0..4     robots 0 through 4 (also 0:4)
-#   a,~3          all except 3       (none)   a bare command means "a"
-#   ;             separates clauses; a later clause wins where they overlap
-#
-# "a-862" -> all to -862      "a862" -> all to +862      "7-862" -> robot 7
-#
+RUNTIME_GAIT_POLL_EVERY  = 1             # poll the callback every N frames
+RUNTIME_GAIT_SWITCH_MODE = "zero_phase"  # "zero_phase" (continuous) | "immediate"
+RUNTIME_GAIT_VERBOSE     = False         # log every applied switch
+
+# For "gait_control:script": (seconds, "command text"), syntax table in gait.py.
+#   a/all/*  everyone    even/odd  by parity    3,7,12  those    0..4  a range
+#   a,~3  all but 3    ";" separates clauses, later wins    "a-862" -> all to -862
 RUNTIME_GAIT_SCRIPT = [
-    # ( 5.0, "a-862"),          # at t=5s every robot switches to -862
-    # (10.0, "0..4851"),        # at t=10s robots 0-4 go to 851
-    # (15.0, "3,7,12=461"),     # '=' optional, purely for readability
+    # ( 5.0, "a-862"),
+    # (10.0, "0..4851"),
+    # (15.0, "3,7,12=461"),
 ]
 
-# Print one line per applied switch (time, robot id, old -> new, decoded
-# frequency / amplitude / phase).  Switches are queued to the robot's next zero
-# phase, so the logged time is later than the requested one -- by design.
-# Robots switching together on the same step are collapsed onto one line.
-RUNTIME_GAIT_VERBOSE = False
+# ── Strategy: Voronoi grouping -> spatial roles -> layered commands ───────────
+# Used by "gait_control:strategy".  Priority: group_rules > roles > leave_command.
+# Pipeline, the two tuning traps, and the measured max_dist percolation table
+# are all documented at the top of strategy.py.
+_BODY_SPAN = (MAIN_LEN + 2 * ARM_LEN) / 2.0        # == L_s, defined further down
+STRATEGY_SPEC = {
+    "max_dist":      65,                 # ~116 px at N=100; percolates above 1.2
+    "period":        0.25,               # seconds of sim time between recomputes
+    "leave_command": 32,                 # layer 3: interior / isolated robots
+   
+    # Layer 1 -- by group size.  First match wins; (lo, hi) inclusive, None =
+    # open.  Keep the top end bounded or layer 2 starves -- see strategy.py.
+    # Optional "alignment_range" also gates on the group's nematic order.
+    "group_rules": [
+        {"name": "small", "size_range": (3, 7),  "command":  62},
+        {"name": "mid",   "size_range": (8, None), "command": 62},
+    ],
+    "group_n_ticks": 6,                  # ticks holding a rule before it commits
 
-# Poll the callback every N rendered frames (1 = every frame, i.e. 60 Hz of
-# simulated time).  Raise it if the callback is expensive.
-RUNTIME_GAIT_POLL_EVERY  = 1
+    # Layer 2 -- spatial roles.  Earlier entries in this list win over later
+    # ones.  Names: spatial_roles.SELECTORS.  Any extra key is passed straight
+    # to the selector -- the useful ones for the PCA family
+    # (principal/major/minor_ends, group_*_ends) are:
+    #     "n_per_end":      每端取几台机器人 (默认 1)
+    #     "axis":           "major" / "minor" / "both"
+    #     "min_anisotropy": 长短比低于此值就判定方向没意义，该帧不选人 (默认 1.5)
+    #     "min_group_size": 最大组小于此值就不选人 (group_*_ends)
+    #     "select_from":    "all" 在全场选端点(默认) / "group" 只在该组内选
+    # "farthest" 用的是 "n"；extremes / convex_hull 之类没有额外参数。
+    #
+    # "override_group": True 把这条角色提到分组层**之上** —— 默认 False，即
+    # 机器人一旦被某条 group_rule 认领就执行分组指令，角色管不着它。
+    "roles": [
+        # {"selector": "convex_hull", "command": -52,
+        #  "n_frames_join": 18, "n_frames_leave": 18},
+        {"selector": "group_major_ends", "command": -52, "min_group_size": 3,
+         "n_per_end": 1, "override_group": False, "n_per_end": 6},
+    ],
 
-# How a queued change takes effect:
-#   "zero_phase" : wait for that robot's next zero phase, then switch with the
-#                  commanded joint angle continuous (no PD kick).  The X digit
-#                  of a runtime command is ignored -- see gait.py.
-#   "immediate"  : rewrite the parameters on the spot, honouring the X digit.
-#                  Produces a step in the commanded angle; for control runs.
-RUNTIME_GAIT_SWITCH_MODE = "zero_phase"
+    "verbose": False,                    # log group/role join+leave events
+}
+
+# ── Coverage ratio k = A' / A_total ───────────────────────────────────────────
+# Per robot, the region its two arms can sweep: the body rectangle plus a sector
+# of radius arm_len and opening 2A at each shoulder, so A_0 = main_len*main_w +
+# (A1+A2)*arm_len^2 -- set purely by the amplitude.  A' is the UNION of all n
+# such regions (overlaps counted once, A' <= n*A_0), A_total the ring's area.
+# Large k = the swarm's reachable area fills the arena and overlaps heavily,
+# i.e. more interaction and collision.  The union is NOT clipped at the wall, so
+# k may exceed 1 slightly.  Definition and method: sweep_coverage.py
+COVERAGE_ENABLED = True
+COVERAGE_CELL    = 4.0    # raster cell (px); 0.04% at n=100, ~5 ms/frame
+COVERAGE_EVERY   = 5      # measure every N recorded frames (60 fps -> 12 Hz)
 
 # ── Ring (confining boundary) options ─────────────────────────────────────────
 # The boundary can be FIXED (anchored to the world) or MOVABLE (free to move),
@@ -230,8 +249,8 @@ RUNTIME_GAIT_SWITCH_MODE = "zero_phase"
 #   polygon + fixed    : regular n-gon wall held in place at its corners.
 #   polygon + movable  : n rigid edge-links joined by free-rotating corner
 #                        hinge joints — a deformable loop the swarm can reshape.
-RING_MOVABLE   = False        # False = fixed (default); True = movable
-RING_SHAPE     = "circle"     # "circle" (default) | "polygon"
+RING_MOVABLE   = True        # False = fixed (default); True = movable
+RING_SHAPE     = "polygon"     # "circle" (default) | "polygon"
 
 # --- Ring scaling with population -------------------------------------------
 # Both knobs are exactly 1.0 at N_SMARTICLES == BASE_N_REF, so the reference

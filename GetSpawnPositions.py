@@ -38,7 +38,7 @@ N_TRIALS = 200
 #     omega=(_om0, _om0),
 #     amplitude=(_am0, _am0),
 # )
-_EXP_NAME = "init_conditions_200"
+_EXP_NAME = "init_conditions_200_p_N17"
 SAVE_PATH = os.path.join("init_conditions", f"{_EXP_NAME}.json")
 IMAGE_DIR = os.path.join("spawn_images",    _EXP_NAME)
 

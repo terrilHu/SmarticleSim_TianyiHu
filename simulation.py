@@ -61,6 +61,7 @@ from naming import generate_trial_name
 
 import gait
 from gait import GaitController, resolve_callback
+from sweep_coverage import CoverageMeter
 
 # =============================================================================
 # Utilities
@@ -349,6 +350,7 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     ORDs, ORDs_abs, ORD_diffs, ORD_diffs_abs = [], [], [], []
     Mdist, GRs, ROT_ORDS, IMPACTS, POS_ALL   = [], [], [], [], []
     time_hist = []
+    COVERAGE  = []          # (t, k, A_union, A0_sum, overlap) every N frames
 
     jam_time   = None
     t          = 0.0
@@ -405,6 +407,16 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
             ring_damp_bodies = [ring.body]
         elif ring.bodies:                    # movable polygon: one body/edge
             ring_damp_bodies = list(ring.bodies)
+
+    # ── Coverage meter (k = A'/A_total) ───────────────────────────────────────
+    # The canvas and the ring mask are built once here and reused every frame;
+    # only each robot's own bounding box is touched per measurement.
+    cov_meter = None
+    cov_every = max(1, int(getattr(cfg, "COVERAGE_EVERY", 5)))
+    if getattr(cfg, "COVERAGE_ENABLED", False):
+        cov_meter = CoverageMeter(
+            (center.x, center.y), INNER_R, RING_SHAPE, RING_N_SIDES,
+            cell=float(getattr(cfg, "COVERAGE_CELL", 4.0)))
 
     _vstride = max(1, VIDEO_STRIDE)
 
@@ -527,6 +539,13 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
             ROT_ORDS.append(rot_ord)
             time_hist.append(t)
 
+            # Sweep-coverage k.  Strided because it is the one metric whose cost
+            # is set by arena area rather than by n, and k varies slowly.
+            if cov_meter is not None and frame_i % cov_every == 0:
+                _k, _ci = cov_meter.measure(smarticles)
+                COVERAGE.append((t, _k, _ci["A_union"], _ci["A0_sum"],
+                                 _ci["overlap"], _ci["k_naive"]))
+
             # Only frames that are actually encoded need to be drawn.  The
             # previous code rendered every frame and then threw away
             # (VIDEO_STRIDE - 1) of them; the resulting video is identical.
@@ -602,6 +621,13 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
             if _chunk:
                 f.write("".join(_chunk))
 
+    if COVERAGE:
+        with open(prefix + "_coverage.csv", "w", newline="", encoding="utf-8") as f:
+            f.write("time,k,A_union,A0_sum,overlap,k_naive\r\n")
+            f.write("".join(
+                f"{ti:.6f},{kk:.6f},{au:.2f},{a0:.2f},{ov:.6f},{kn:.6f}\r\n"
+                for ti, kk, au, a0, ov, kn in COVERAGE))
+
     if POS_ALL:
         with open(prefix + "_POS_ALL.csv", "w", newline="") as f:
             # Identical bytes to the csv.writer version (CRLF terminator, no
@@ -624,41 +650,99 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
         except Exception as e:
             print(f"[WARN] alignment computation failed: {e}")
 
-    return {"trial_id": trial_id,
-            "ic_idx": used_ic_idx if used_ic_idx is not None else "",
-            "final_rg": final_rg,
-            "final_kappa": final_kappa,
-            "final_area":  final_area}
+    summary = {"trial_id": trial_id,
+               "ic_idx": used_ic_idx if used_ic_idx is not None else "",
+               "final_rg": final_rg,
+               "final_kappa": final_kappa,
+               "final_area":  final_area}
+    if COVERAGE:
+        # k over the whole trial, and over its last 10 s -- the steady-state
+        # value is the one worth comparing across trials.
+        _kk = np.array([c[1] for c in COVERAGE], dtype=float)
+        _tt = np.array([c[0] for c in COVERAGE], dtype=float)
+        _tail = _kk[_tt >= (_tt[-1] - 10.0)]
+        summary["k_mean"]    = float(_kk.mean())
+        summary["k_steady"]  = float(_tail.mean())
+        summary["k_overlap"] = float(np.mean([c[4] for c in COVERAGE]))
+    return summary
 
 
 # =============================================================================
 # Config snapshot
 # =============================================================================
 
+def _jsonable(value, _depth=0):
+    """
+    Convert one config value into something json can write, or raise TypeError.
+
+    Recursive on purpose: the settings added since this file was written are
+    nested -- STRATEGY_SPEC holds a list of rule dicts whose "size_range" is a
+    tuple, RUNTIME_GAIT_SCRIPT is a list of (seconds, text) tuples.  A
+    shallow pass would either drop them or write something json chokes on.
+    """
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        # inf / nan are not valid JSON; keep them readable rather than crash
+        return value if math.isfinite(value) else repr(value)
+    if _depth > 8:
+        raise TypeError("nested deeper than 8 levels")
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(x, _depth + 1) for x in value]
+    if isinstance(value, (set, frozenset)):
+        return [_jsonable(x, _depth + 1) for x in sorted(value, key=repr)]
+    if isinstance(value, dict):
+        # json needs string keys; config only ever uses str/int keys anyway
+        return {str(k): _jsonable(v, _depth + 1) for k, v in value.items()}
+    if isinstance(value, np.ndarray):
+        return _jsonable(value.tolist(), _depth + 1)
+    if isinstance(value, np.generic):
+        return _jsonable(value.item(), _depth + 1)
+    raise TypeError(type(value).__name__)
+
+
 def save_config_snapshot(out_dir: str):
-    """Save key config parameters for this experiment as JSON in the out_dir root."""
+    """
+    Save the experiment's config as JSON in the out_dir root.
+
+    Everything public in config.py that can be represented in JSON is written,
+    including the dict-valued settings (STRATEGY_SPEC, GAIT_BY_TYPE,
+    BODY_TYPES) that the earlier version silently dropped.  Names starting with
+    "_" are module-level intermediates and are skipped, as are imported modules.
+    Anything else that cannot be serialised is listed under "_skipped" with its
+    type and repr, so a parameter can never disappear from the record without
+    leaving a trace.
+    """
     import config as _cfg
     import json
+    import types
 
-    # Only record serializable scalar/list parameters; skip module-level intermediates (prefixed with _)
-    snapshot = {}
+    snapshot, skipped = {}, {}
     for k, v in vars(_cfg).items():
-        if k.startswith("_"):
+        if k.startswith("_") or isinstance(v, types.ModuleType):
             continue
-        if isinstance(v, (int, float, bool, str)):
-            snapshot[k] = v
-        elif isinstance(v, list):
-            # Lists like COMMAND_ARRAY whose elements are int
-            try:
-                snapshot[k] = [list(x) if isinstance(x, tuple) else x for x in v]
-            except Exception:
-                pass
+        try:
+            snapshot[k] = _jsonable(v)
+        except Exception as e:
+            skipped[k] = {"type": type(v).__name__, "repr": repr(v)[:200],
+                          "why": str(e)}
+    if skipped:
+        snapshot["_skipped"] = skipped
 
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "config_snapshot.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(snapshot, f, indent=2)
-    print(f"[main] Config snapshot saved: {path}")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        # A snapshot problem must not abort the experiment it is describing
+        print(f"[main] [WARN] Config snapshot failed: {type(e).__name__}: {e}")
+        return
+    note = f"  ({len(skipped)} entr{'y' if len(skipped) == 1 else 'ies'} "
+    note += "not serialisable, see _skipped)" if skipped else ""
+    print(f"[main] Config snapshot saved: {path}"
+          f"  [{len(snapshot) - bool(skipped)} settings]"
+          f"{note if skipped else ''}")
 
 
 # =============================================================================
@@ -668,7 +752,7 @@ def save_config_snapshot(out_dir: str):
 def main():
     WORKERS   = PARALLEL_WORKERS           # >1 for parallel trials (config.py)
     PREVIEW   = False
-    INIT_FILE = "init_conditions/init_conditions_200.json"
+    INIT_FILE = "init_conditions/init_conditions_200_p.json"
     #INIT_FILE = os.path.join("init_conditions", EXP_NAME + ".json")
     N_TRIALS  = N_TRIALS_GLOBAL            # 0 = auto-read from init file
     USE_PRESET = True

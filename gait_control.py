@@ -171,3 +171,32 @@ def example_text(t, robots, ctx):
         ctx["i"] = i + 1
         return plan[i][1]
     return None
+
+
+def strategy(t, robots, ctx):
+    """
+    Voronoi grouping -> spatial roles -> layered commands, configured
+    declaratively in config.STRATEGY_SPEC.  See strategy.py for the pipeline
+    and spatial_roles.py for the role vocabulary.
+
+        RUNTIME_GAIT_CONTROLLER = "gait_control:strategy"
+        STRATEGY_SPEC = {
+            "max_dist":      150.0,
+            "leave_command": 462,
+            "group_rules":  [{"size_range": (8, None), "command": -851},
+                             {"size_range": (3, 7),    "command":  862}],
+            "roles":        [{"selector": "group_major_ends", "command": -426}],
+        }
+
+    The strategy object is built once per trial and kept in ctx, so its
+    hysteresis counters and event log survive across polls.  Reach it as
+    ctx["strategy"] from a breakpoint: .summary() for a one-line census,
+    .rec for the current frame's grouping, .events() for the full event flow.
+    """
+    strat = ctx.get("strategy")
+    if strat is None:
+        import config as cfg
+        from strategy import build_strategy
+        strat = build_strategy(getattr(cfg, "STRATEGY_SPEC", None))
+        ctx["strategy"] = strat
+    return strat(t, robots, ctx)
