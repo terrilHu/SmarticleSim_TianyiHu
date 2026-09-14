@@ -1,11 +1,13 @@
 """
 batch_group_plots.py
 --------------------
-批量画"分组随时间演化"的图，并对每组实验做 trial 之间的平均统计。
+Batch-plot "group composition over time" figures, plus cross-trial averaged
+statistics for each group of experiments.
 
-输入是**一串实验目录**，每个实验目录下面是一系列 trial 文件夹：
+The input is **a list of experiment directories**, each containing a series of
+trial folders:
 
-    datafile/exp_A/                 <- 命令行给这一层
+    datafile/exp_A/                 <- this is the level passed on the command line
         config_snapshot.json
         trial_0000/trial_0000_POS_ALL.csv
         trial_0001/trial_0001_POS_ALL.csv
@@ -13,51 +15,63 @@ batch_group_plots.py
     datafile/exp_B/
         ...
 
-用法:
+Usage:
     python batch_group_plots.py datafile/exp_A datafile/exp_B
-    python batch_group_plots.py "datafile/*"                  # 通配符
-    python batch_group_plots.py --dirs-from list.txt          # 每行一个实验目录
+    python batch_group_plots.py "datafile/*"                  # wildcard
+    python batch_group_plots.py --dirs-from list.txt          # one experiment dir per line
     python batch_group_plots.py datafile/exp_A --figs composition mean_groupsize
 
-输出分两层。**每个 trial** 一套（默认放回该 trial 文件夹）：
+Output has two tiers. **Per trial** (written back into that trial's folder by
+default):
 
-    <trial>_composition.png   各规模档位占了多少机器人？(堆叠面积)
-    <trial>_groupsize.png     最大组、"随手抓一台它在多大的组里"怎么变？
-    <trial>_kymograph.png     谁和谁并在一起，什么时候？
-    <trial>_counts.png        组的数量、最大团占比
-    <trial>_snapshots.png     空间上长什么样？
+    <trial>_composition.png   how many robots are in each size bin? (stacked area)
+    <trial>_groupsize.png     largest group, and "grab a random robot, how big is its group" over time
+    <trial>_kymograph.png     who is grouped with whom, and when?
+    <trial>_counts.png        number of groups, largest-cluster fraction
+    <trial>_snapshots.png     what it looks like spatially
 
-**每组实验**一套（放在实验目录下），把该实验所有 trial 平均起来：
+**Per experiment** (written into the experiment directory), averaging all
+trials of that experiment:
 
-    <exp>_mean_composition.png   平均后的堆叠面积
-    <exp>_mean_groupsize.png     细线是各 trial，粗线是均值，带是 ±1 std
-    <exp>_mean_counts.png        组数、最大团占比的均值与离散度
-    <exp>_trial_stats.csv        每个 trial 一行的标量统计
-    <exp>_mean_timeseries.csv    对齐到公共时间轴后各量的 mean/std
+    <exp>_mean_composition.png   averaged stacked area
+    <exp>_mean_groupsize.png     thin lines = individual trials, bold = mean, band = ±1 std
+    <exp>_mean_counts.png        mean and spread of group count / largest-cluster fraction
+    <exp>_trial_stats.csv        one row of scalar stats per trial
+    <exp>_mean_timeseries.csv    mean/std of each quantity after aligning to a common time axis
 
-时间轴的 t=0 是**第一个被记录的帧**，不是仿真的 t=0：RECORD_AFTER_WARMUP
-会跳过 WARMUP_STEPS 那段暖机，所以 12 秒的 trial 落盘的是约 11 秒数据。
-这样各 trial 的 t=0 对应同一个物理时刻（暖机刚结束），跨 trial 平均才对得齐。
+The time axis's t=0 is **the first recorded frame**, not the simulation's
+t=0: RECORD_AFTER_WARMUP skips the WARMUP_STEPS warm-up period, so a 12s
+trial has only about 11s of data on disk. This way t=0 lines up to the same
+physical moment (right after warm-up) across trials, so cross-trial averaging
+is aligned correctly.
 
-跨 trial 平均前会插值到公共时间轴（取最短那条 trial 的时长；外推没有意义，
-短的那条之后本就没有数据），时长不一致会在日志里说明截断到了多长。
+Before averaging across trials, series are interpolated onto a common time
+axis (the length of the shortest trial; extrapolating past that is meaningless
+since the shortest trial simply has no data there). A duration mismatch is
+reported in the log along with the truncated length.
 
-分组结果缓存成 trial_XXXX_groups_d<max_dist>.csv（列与 pos_all_grouping 的
-process_pos_all_groups 完全一致），下次重画直接读缓存，--force 强制重算。
-不同 max_dist 的缓存互不覆盖，文件名里带着阈值。
+Grouping results are cached as trial_XXXX_groups_d<max_dist>.csv (columns
+match pos_all_grouping's process_pos_all_groups exactly); a re-plot reads the
+cache directly next time, --force forces a recompute. Caches for different
+max_dist values don't overwrite each other -- the threshold is in the filename.
 
-堆叠面积图画的是**滑动平均后**的占比（默认 2 秒，--smooth-s 可改，给 0 关掉）。
-所以一条带可能比它自己的档位下限还薄：某帧存在一个 16 台的组，瞬时占比就是
-16%，但若这个组在 2 秒窗口里只存在 30% 的时间，画出来就是 0.3*16% ≈ 5%。
-换句话说带的厚度是"这段时间里有多少机器人-时间落在该档位"，不是某一瞬间的占比。
-想看瞬时值就 --smooth-s 0。
+The stacked-area plot shows the **smoothed** share (2s moving average by
+default, changeable with --smooth-s, 0 disables it). So a band can read
+thinner than its own bin's lower bound: a frame might have one 16-robot group
+giving an instantaneous share of 16%, but if that group only exists for 30% of
+a 2s window, the plotted value is 0.3*16% ~= 5%. In other words the band's
+thickness is "how much robot-time fell into this bin over the window", not the
+share at any single instant. Use --smooth-s 0 to see instantaneous values.
 
-绘图沿用实机侧 plot_group_evolution.py 的配色与平滑方式；数据入口不同：
-实机读带 Time 列的 group<stamp>.csv，这里时间由 Step / fps 换算，fps 优先从
-实验目录的 config_snapshot.json 读 RENDER_FPS_HEADLESS。
+Plotting reuses the colour scheme and smoothing approach from the hardware-side
+plot_group_evolution.py; the data source differs: hardware reads
+group<stamp>.csv with a Time column, here time is computed from Step / fps,
+with fps preferentially read from the experiment directory's
+config_snapshot.json (RENDER_FPS_HEADLESS).
 
-分组用的是 pos_all_grouping.compute_frame_groups —— 和 strategy.py 实时决策
-调的是同一个函数，已逐帧核对过两者划分完全一致（前提是 max_dist 相同）。
+Grouping uses pos_all_grouping.compute_frame_groups -- the same function
+strategy.py's realtime decision-making calls, verified frame-by-frame to
+produce identical groupings (provided max_dist matches).
 """
 
 import argparse
@@ -74,8 +88,10 @@ import matplotlib.pyplot as plt
 
 from pos_all_grouping import compute_frame_groups
 
-# 图上标注一律用英文：投稿和汇报都用得上，也省掉了跨机器的中文字体依赖
-# (Windows 有 SimHei、Linux 常常什么都没有，同一份脚本在两边出图会不一样)。
+# Figure labels are always English: usable for both papers and reports, and it
+# avoids a cross-machine Chinese font dependency
+# (Windows has SimHei, Linux often has nothing, so the same script would render
+# differently on the two).
 plt.rcParams["axes.unicode_minus"] = False
 
 FIG_TRIAL = ("composition", "groupsize", "kymograph", "counts", "snapshots")
@@ -84,25 +100,27 @@ FIG_ALIASES = {
     "all": FIG_TRIAL + FIG_EXP,
     "trial": FIG_TRIAL,
     "exp": FIG_EXP,
-    "aggregation": ("composition", "groupsize"),   # 原来那张图拆开后的两半
+    "aggregation": ("composition", "groupsize"),   # the two halves of the original combined figure
 }
 
 SIZE_COLORS = ["#d9d9d9", "#9ecae1", "#4292c6", "#2171b5", "#08306b"]
 C_LARGEST, C_MEANSZ, C_ALIGN = "#08306b", "#e6550d", "#31a354"
 
 EPILOG = """\
-位置参数是实验目录，里面装着 trial_XXXX/ 子文件夹。
---figs 可选:
-    每个 trial : composition groupsize kymograph counts snapshots
-    每组实验   : mean_composition mean_groupsize mean_counts
-    别名       : all / trial / exp / aggregation(=composition+groupsize)
+The positional arguments are experiment directories, each containing
+trial_XXXX/ subfolders.
+--figs options:
+    per trial      : composition groupsize kymograph counts snapshots
+    per experiment : mean_composition mean_groupsize mean_counts
+    aliases        : all / trial / exp / aggregation(=composition+groupsize)
 """
 
 
 def size_bins(n):
     """
-    分档随种群规模走。实机那份写死 9+ 封顶，对 17 台正合适；
-    到 100 台时"9 台以上"会把绝大多数机器人塞进同一档，图就没信息了。
+    Bin edges scale with population size. The hardware-side version hard-codes
+    a 9+ cap, which is fine for 17 robots; at 100 robots "9+" would dump the
+    vast majority of robots into one bin and the plot would carry no information.
     """
     if n <= 20:
         edges = [1, 3, 5, 8]
@@ -121,7 +139,7 @@ def size_bins(n):
 
 
 # =============================================================================
-# 读取：POS_ALL -> 每帧分组
+# Loading: POS_ALL -> per-frame grouping
 # =============================================================================
 
 def find_pos_all(folder):
@@ -131,10 +149,12 @@ def find_pos_all(folder):
 
 def find_trials(exp_dir):
     """
-    实验目录下所有含 *_POS_ALL.csv 的直接子目录，按名字排序。
+    All direct subdirectories of the experiment directory that contain
+    *_POS_ALL.csv, sorted by name.
 
-    如果实验目录自己就直接放着 POS_ALL（有人图省事把单个 trial 目录传进来），
-    就把它当成"只有一个 trial 的实验"，免得静默地什么都不做。
+    If the experiment directory itself directly holds a POS_ALL (someone
+    passed a single trial directory in for convenience), treat it as "an
+    experiment with just one trial" instead of silently doing nothing.
     """
     out = [sub for sub in sorted(glob.glob(os.path.join(exp_dir, "*")))
            if os.path.isdir(sub) and find_pos_all(sub)]
@@ -145,8 +165,9 @@ def find_trials(exp_dir):
 
 def detect_fps(folder, fallback=60.0):
     """
-    每秒记录多少帧 POS_ALL。优先用该实验自己的 config_snapshot.json
-    （run_trial 把它写在实验目录里），退回到当前 config.py。
+    How many POS_ALL frames are recorded per second. Prefers this experiment's
+    own config_snapshot.json (run_trial writes it into the experiment
+    directory), falling back to the current config.py.
     """
     here = os.path.abspath(folder)
     for d in (here, os.path.dirname(here)):
@@ -168,11 +189,14 @@ def detect_fps(folder, fallback=60.0):
 
 def group_table(pos_all_csv, max_dist, include_singletons=True, force=False):
     """
-    每帧每组一行的表，列与 pos_all_grouping.process_pos_all_groups 相同。
+    One row per group per frame, columns matching
+    pos_all_grouping.process_pos_all_groups.
 
-    结果缓存在 <prefix>_groups_d<max_dist>.csv 旁边。计算本身调的就是
-    compute_frame_groups，只是把 process_pos_all_groups 里
-    "每帧重扫一遍整张表"(O(帧数^2)) 换成排序后切片 —— 分组逻辑一字未改。
+    Results are cached alongside the source as <prefix>_groups_d<max_dist>.csv.
+    The computation itself calls compute_frame_groups; the only change from
+    process_pos_all_groups is replacing its "rescan the whole table every
+    frame" (O(frames^2)) with a sort-then-slice -- the grouping logic itself is
+    untouched.
     """
     tag = f"{max_dist:g}".replace(".", "p")
     cache = pos_all_csv.replace("_POS_ALL.csv", f"_groups_d{tag}.csv")
@@ -227,11 +251,13 @@ def load_frames(groups_df, fps):
 
 def track_groups(frames, min_size=2, min_jaccard=0.3):
     """
-    给每帧的分组配一个跨帧稳定的编号：按成员集合的 Jaccard 重叠度做贪心
-    一对一匹配。和 pos_all_grouping.track_groups 同样的思路，这里独立实现是
-    因为画图想追踪所有 size>=2 的组，而那份是围绕 DataFrame 组织的。
+    Assign each frame's groups a cross-frame-stable id: greedy one-to-one
+    matching by Jaccard overlap of member sets. Same idea as
+    pos_all_grouping.track_groups; reimplemented independently here because
+    plotting wants to track every group with size>=2, while that version is
+    organized around a DataFrame.
 
-    -> [ {gid: members}, ... ] 每帧一个 dict
+    -> [ {gid: members}, ... ] one dict per frame
     """
     prev = {}
     next_gid = 1
@@ -263,11 +289,11 @@ def track_groups(frames, min_size=2, min_jaccard=0.3):
 
 
 # =============================================================================
-# 每个 trial 的时间序列（画图和跨 trial 平均都吃这个）
+# Per-trial time series (consumed by both plotting and cross-trial averaging)
 # =============================================================================
 
 def trial_series(frames, bins):
-    """把逐帧的分组结果压成几条等长的时间序列。"""
+    """Collapse the per-frame grouping results into a handful of equal-length time series."""
     m = len(frames)
     secs = np.array([f[1] for f in frames], dtype=float)
     frac = np.zeros((m, len(bins)))
@@ -283,7 +309,7 @@ def trial_series(frames, bins):
                     frac[i, b] += g["size"] / max(total, 1)
                     break
         largest[i] = max(sizes)
-        # 机器人视角的平均组规模: 随便抓一台机器人, 它所在的组多大
+        # Robot's-eye-view mean group size: grab a random robot, how big is its group
         mean_sz[i] = sum(s * s for s in sizes) / max(total, 1)
         align[i] = sum(g["size"] * g["alignment"] for g in groups) / max(total, 1)
         n_all[i] = len(groups)
@@ -296,7 +322,7 @@ def trial_series(frames, bins):
 
 
 def smooth_window(secs, seconds):
-    """把"多少秒"换算成滑动窗口的帧数；<=0 表示不平滑。"""
+    """Convert "how many seconds" into a moving-window frame count; <=0 means no smoothing."""
     if seconds is None or seconds <= 0:
         return 1
     span = max(float(secs[-1]) - float(secs[0]), 1e-9)
@@ -316,13 +342,14 @@ def roll_median(v, win):
 
 
 # =============================================================================
-# 图 1a: 组成（各规模档位占多少机器人）
+# Figure 1a: composition (how many robots in each size bin)
 # =============================================================================
 
 def fig_composition(sr, labels, path, title="", smooth_s=2.0, note=None):
     secs = sr["secs"]
-    # 逐帧占比抖动很大(单帧的一条 Voronoi 边就能让两个组合并又分开)，
-    # 直接画会被噪声淹没。用约 2 秒的滑动平均，趋势才看得出来。
+    # Per-frame shares are very jittery (a single Voronoi edge in one frame can
+    # merge and split two groups), so plotting them raw would be drowned in
+    # noise. A ~2s moving average is used so the trend is actually visible.
     win = smooth_window(secs, smooth_s)
     frac_s = np.column_stack([roll_mean(sr["frac"][:, b], win)
                               for b in range(sr["frac"].shape[1])])
@@ -349,7 +376,7 @@ def fig_composition(sr, labels, path, title="", smooth_s=2.0, note=None):
 
 
 # =============================================================================
-# 图 1b: 组规模
+# Figure 1b: group size
 # =============================================================================
 
 def fig_groupsize(sr, path, title="", smooth_s=2.0):
@@ -380,7 +407,7 @@ def fig_groupsize(sr, path, title="", smooth_s=2.0):
 
 
 # =============================================================================
-# 图 2: kymograph (时间 x 机器人)
+# Figure 2: kymograph (time x robot)
 # =============================================================================
 
 def fig_kymograph(frames, tracked, path, min_life=6, title=""):
@@ -388,7 +415,7 @@ def fig_kymograph(frames, tracked, path, min_life=6, title=""):
     row = {m: i for i, m in enumerate(ids)}
     secs = [f[1] for f in frames]
 
-    # 每台机器人每帧所属的那个组编号，落单为 -1
+    # The group id each robot belongs to on each frame; -1 for a lone robot
     M = np.full((len(ids), len(frames)), -1, dtype=int)
     for j, now in enumerate(tracked):
         for gid, members in now.items():
@@ -396,19 +423,21 @@ def fig_kymograph(frames, tracked, path, min_life=6, title=""):
                 if m in row:
                     M[row[m], j] = gid
 
-    # 只给"活得够久"的组分颜色。存在一两帧就散掉的组统统一个中性淡紫，
-    # 否则上百个瞬生瞬灭的组各占一个色号，图会变成彩色噪声。
+    # Only assign colours to groups that "live long enough". Groups that
+    # exist for just a frame or two before dispersing all get a single
+    # neutral light purple, otherwise hundreds of transient groups would each
+    # claim their own colour and the plot would turn into coloured noise.
     life = {g: int((M == g).any(axis=0).sum()) for g in np.unique(M) if g >= 0}
     stable = sorted([g for g, n in life.items() if n >= min_life])
     cmap = plt.get_cmap("tab20")
     color = {g: cmap(i % 20) for i, g in enumerate(stable)}
     rgb = np.ones(M.shape + (3,))
-    rgb[M >= 0] = (0.72, 0.72, 0.78)         # 短暂成组
+    rgb[M >= 0] = (0.72, 0.72, 0.78)         # briefly grouped
     for g, c in color.items():
         rgb[M == g] = c[:3]
-    rgb[M < 0] = (0.95, 0.95, 0.95)          # 落单
+    rgb[M < 0] = (0.95, 0.95, 0.95)          # alone
 
-    # 机器人多的时候逐行标号会糊成一片，改成稀疏刻度
+    # With many robots, per-row labels would blur together, so use sparse ticks
     step = max(1, len(ids) // 40)
     fig, ax = plt.subplots(figsize=(12, min(24, 0.32 * len(ids) + 2)))
     ax.imshow(rgb, aspect="auto", interpolation="nearest", origin="lower",
@@ -417,7 +446,8 @@ def fig_kymograph(frames, tracked, path, min_life=6, title=""):
     ax.set_yticklabels([ids[i] for i in range(0, len(ids), step)], fontsize=8)
     ax.set_ylabel("robot ID")
     ax.set_xlabel("time (s)")
-    # 图例说明放到第二行：机器人多的时候一行标题会被画布切掉右半截
+    # Legend text goes on a second line: with many robots a one-line title
+    # would get its right half clipped by the canvas
     ax.set_title(f"Group membership per robot{title}\n"
                  f"colour = groups lasting >{min_life} frames   |   "
                  f"light purple = transient   |   grey = alone",
@@ -428,7 +458,7 @@ def fig_kymograph(frames, tracked, path, min_life=6, title=""):
 
 
 # =============================================================================
-# 图 3: 数量
+# Figure 3: counts
 # =============================================================================
 
 def fig_counts(sr, path, title="", smooth_s=2.0):
@@ -461,7 +491,7 @@ def fig_counts(sr, path, title="", smooth_s=2.0):
 
 
 # =============================================================================
-# 图 4: 空间快照
+# Figure 4: spatial snapshots
 # =============================================================================
 
 def fig_snapshots(frames, tracked, path, n=5, title=""):
@@ -484,7 +514,7 @@ def fig_snapshots(frames, tracked, path, n=5, title=""):
                             ha="center", va="center")
         ax.set_title(f"t = {sec:.0f}s", fontsize=10)
         ax.set_xlim(min(xs) - pad, max(xs) + pad)
-        ax.set_ylim(max(ys) + pad, min(ys) - pad)   # 仿真世界坐标 y 向下，与视频一致
+        ax.set_ylim(max(ys) + pad, min(ys) - pad)   # simulation world y points down, matching the video
         ax.set_xticks([]); ax.set_yticks([])
         ax.set_aspect("equal")
     fig.suptitle(f"Spatial snapshots{title}\n"
@@ -496,15 +526,16 @@ def fig_snapshots(frames, tracked, path, n=5, title=""):
 
 
 # =============================================================================
-# 跨 trial 平均
+# Cross-trial averaging
 # =============================================================================
 
 def align_series(all_sr, n_points=None):
     """
-    把若干条 trial 的序列插到公共时间轴上。
+    Interpolate a number of trials' series onto a common time axis.
 
-    时间轴取 0 .. min(各 trial 时长)：外推没有意义，最短那条之后并没有数据，
-    硬补会凭空造出一段"所有 trial 都还在"的假象。
+    The axis spans 0 .. min(trial durations): extrapolating is meaningless
+    since the shortest trial simply has no data past that point, and padding
+    it in would fabricate the illusion that "every trial is still running".
     """
     t_end = min(float(sr["secs"][-1]) for sr in all_sr)
     n_points = n_points or max(len(sr["secs"]) for sr in all_sr)
@@ -532,7 +563,7 @@ def fig_mean_composition(grid, stacked, labels, path, title="", smooth_s=2.0):
 
 
 def _band(ax, grid, arr, color, label, win, show_trials=True):
-    """细线 = 各 trial，粗线 = 均值，带 = ±1 std。"""
+    """Thin lines = individual trials, bold line = mean, band = ±1 std."""
     if show_trials:
         for r in arr:
             ax.plot(grid, roll_mean(r, win), lw=0.7, color=color, alpha=0.25)
@@ -604,7 +635,7 @@ def fig_mean_counts(grid, stacked, path, title="", smooth_s=2.0):
 
 
 # =============================================================================
-# 处理一个 trial / 一组实验
+# Process one trial / one group of experiments
 # =============================================================================
 
 def process_trial(folder, exp_name, bins, labels, args, fps):
@@ -614,7 +645,7 @@ def process_trial(folder, exp_name, bins, labels, args, fps):
     gdf, cache, cached = group_table(pos_all, args.max_dist,
                                      not args.no_singletons, args.force)
     if gdf.empty:
-        print(f"    [skip] {name}: 分组表为空")
+        print(f"    [skip] {name}: group table is empty")
         return None
 
     frames = load_frames(gdf, fps)
@@ -638,7 +669,8 @@ def process_trial(folder, exp_name, bins, labels, args, fps):
         fig_groupsize(sr, p("groupsize"), title, args.smooth_s)
     if "counts" in args.figs:
         fig_counts(sr, p("counts"), title, args.smooth_s)
-    # 跨帧追踪只有这两张图要用，别的组合就不必付这份代价
+    # Cross-frame tracking is only needed for these two figures, so other
+    # combinations don't have to pay that cost
     if {"kymograph", "snapshots"} & args.figs:
         tracked = track_groups(frames, min_size=args.min_size)
         if "kymograph" in args.figs:
@@ -661,10 +693,10 @@ def process_trial(folder, exp_name, bins, labels, args, fps):
         "largest_frac_steady": float(sr["largest_frac"][tail].mean()),
         "alignment_steady": float(sr["alignment"][tail].mean()),
     }
-    print(f"    {name}: {len(frames)} 帧 / {stats['duration_s']:.1f}s, "
-          f"最大组 均值 {stats['largest_mean']:.1f} / 末{args.steady_s:g}s "
-          f"{stats['largest_steady']:.1f} / 峰值 {stats['largest_peak']}"
-          f"   [{'缓存' if cached else '新算'}]")
+    print(f"    {name}: {len(frames)} frames / {stats['duration_s']:.1f}s, "
+          f"largest group mean {stats['largest_mean']:.1f} / last {args.steady_s:g}s "
+          f"{stats['largest_steady']:.1f} / peak {stats['largest_peak']}"
+          f"   [{'cached' if cached else 'computed'}]")
     for fn in made:
         print(f"      -> {fn}")
     return sr, stats
@@ -679,14 +711,15 @@ def process_experiment(exp_dir, args):
     exp_name = os.path.basename(os.path.normpath(exp_dir))
     trials = find_trials(exp_dir)
     if not trials:
-        print(f"  [skip] 没有含 *_POS_ALL.csv 的 trial 子目录")
+        print(f"  [skip] no trial subdirectories containing *_POS_ALL.csv")
         return None
 
     fps, fps_src = (args.fps, "--fps") if args.fps else detect_fps(exp_dir)
-    print(f"  {len(trials)} 个 trial, fps={fps:g} ({fps_src})")
+    print(f"  {len(trials)} trials, fps={fps:g} ({fps_src})")
 
-    # 档位边界要在整组实验内统一，否则各 trial 的堆叠面积图不可比、
-    # 也没法把它们平均起来。先扫一眼各 trial 的机器人数，取最大的定档。
+    # Bin edges must be shared across the whole experiment, otherwise the
+    # trials' stacked-area plots aren't comparable and can't be averaged
+    # together. Scan each trial's robot count first and use the max to set the bins.
     n_max = 0
     for t in trials:
         n_max = max(n_max, int(pd.read_csv(find_pos_all(t),
@@ -708,14 +741,14 @@ def process_experiment(exp_dir, args):
     stats_df = pd.DataFrame(all_stats)
     stats_path = os.path.join(out_dir, f"{exp_name}_trial_stats.csv")
     stats_df.to_csv(stats_path, index=False)
-    print(f"    -> {os.path.basename(stats_path)}  ({len(stats_df)} 行)")
+    print(f"    -> {os.path.basename(stats_path)}  ({len(stats_df)} rows)")
 
     grid, stacked, t_end = align_series(all_sr)
     durations = [float(sr["secs"][-1]) for sr in all_sr]
     if max(durations) - min(durations) > 1e-6:
-        print(f"    [note] trial 时长不一致 "
-              f"({min(durations):.1f}~{max(durations):.1f}s)，"
-              f"跨 trial 平均截断到 {t_end:.1f}s")
+        print(f"    [note] trial durations differ "
+              f"({min(durations):.1f}~{max(durations):.1f}s), "
+              f"cross-trial average truncated to {t_end:.1f}s")
 
     ts = pd.DataFrame({"time": grid})
     for k in ("largest", "mean_size", "alignment", "n_groups", "n_multi",
@@ -749,17 +782,17 @@ def process_experiment(exp_dir, args):
     for c in STEADY_COLS:
         row[f"{c}_mean"] = float(stats_df[c].mean())
         row[f"{c}_std"] = float(stats_df[c].std(ddof=0))
-    print(f"    实验平均 (n={len(stats_df)}): 最大组末{args.steady_s:g}s "
+    print(f"    experiment average (n={len(stats_df)}): largest group, last {args.steady_s:g}s "
           f"{row['largest_steady_mean']:.2f} ± {row['largest_steady_std']:.2f}, "
-          f"组数 {row['n_groups_steady_mean']:.2f} ± "
+          f"group count {row['n_groups_steady_mean']:.2f} ± "
           f"{row['n_groups_steady_std']:.2f}, "
-          f"最大团占比 {row['largest_frac_steady_mean']:.3f} ± "
+          f"largest-cluster fraction {row['largest_frac_steady_mean']:.3f} ± "
           f"{row['largest_frac_steady_std']:.3f}")
     return row
 
 
 # =============================================================================
-# 入口
+# Entry point
 # =============================================================================
 
 def expand_experiments(patterns):
@@ -776,39 +809,39 @@ def expand_experiments(patterns):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="批量画分组演化图，并对每组实验做 trial 之间的平均",
+        description="Batch-plot group evolution figures, and average across trials for each experiment",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=EPILOG)
     ap.add_argument("experiments", nargs="*",
-                    help="实验目录（里面装着 trial_XXXX/ 子文件夹），可用通配符")
+                    help="Experiment directories (each containing trial_XXXX/ subfolders); wildcards allowed")
     ap.add_argument("--dirs-from", default=None,
-                    help="从文件读实验目录列表，每行一个（# 开头为注释）")
+                    help="Read the list of experiment directories from a file, one per line (lines starting with # are comments)")
     ap.add_argument("--max-dist", type=float, default=65.0,
-                    help="Voronoi 邻接距离门限，像素 (默认 65)")
+                    help="Voronoi adjacency distance threshold, in pixels (default 65)")
     ap.add_argument("--no-singletons", action="store_true",
-                    help="不把落单机器人算作 size=1 的组")
+                    help="Don't count lone robots as size=1 groups")
     ap.add_argument("--figs", nargs="+",
                     choices=list(FIG_TRIAL) + list(FIG_EXP) + list(FIG_ALIASES),
-                    default=["all"], help="只画其中几张 (默认全画)")
+                    default=["all"], help="Only plot these figures (default: all)")
     ap.add_argument("--out", default=None,
-                    help="所有图和 csv 输出到这个目录 (默认放回各自的目录)")
+                    help="Write all figures and csv output to this directory (default: back into each experiment's own directory)")
     ap.add_argument("--fps", type=float, default=None,
-                    help="每秒记录帧数 (默认读 config_snapshot.json)")
+                    help="Recording frame rate, frames per second (default: read from config_snapshot.json)")
     ap.add_argument("--smooth-s", type=float, default=2.0,
-                    help="曲线/堆叠图的滑动平均窗口，秒；0 = 不平滑 (默认 2)")
+                    help="Moving-average window for the line/stacked-area plots, in seconds; 0 = no smoothing (default 2)")
     ap.add_argument("--steady-s", type=float, default=10.0,
-                    help="末尾多少秒算作稳态，用于标量统计 (默认 10)")
+                    help="How many trailing seconds count as steady state, used for scalar statistics (default 10)")
     ap.add_argument("--min-size", type=int, default=2,
-                    help="kymograph 里算作'成组'的最小规模")
+                    help="Minimum size counted as a 'group' in the kymograph")
     ap.add_argument("--min-life-s", type=float, default=1.5,
-                    help="kymograph 里能拿到独立颜色的组至少要存活多少秒")
+                    help="Minimum lifetime, in seconds, for a group to get its own color in the kymograph")
     ap.add_argument("--snapshots", type=int, default=5,
-                    help="空间快照画几个时刻")
+                    help="Number of time points to plot in the spatial snapshots")
     ap.add_argument("--title", action="store_true",
-                    help="在图标题里标出实验/trial 名和 max_dist")
+                    help="Show the experiment/trial name and max_dist in the figure title")
     ap.add_argument("--force", action="store_true",
-                    help="忽略已有的分组缓存，重新计算")
+                    help="Ignore any existing group cache and recompute")
     ap.add_argument("--summary", default=None,
-                    help="把每组实验的汇总写成一个 csv")
+                    help="Write the summary across experiments to a single csv file")
     args = ap.parse_args()
 
     figs = set()
@@ -822,16 +855,16 @@ def main():
             patterns += [ln.strip() for ln in f
                          if ln.strip() and not ln.lstrip().startswith("#")]
     if not patterns:
-        ap.error("至少要给一个实验目录（或用 --dirs-from）")
+        ap.error("You must give at least one experiment directory (or use --dirs-from)")
 
     exps = expand_experiments(patterns)
     if not exps:
-        print("没找到任何目录。位置参数应当是实验目录，"
-              "里面装着 trial_XXXX/ 子文件夹。")
+        print("No directories found. The positional arguments should be "
+              "experiment directories containing trial_XXXX/ subfolders.")
         return 1
 
-    print(f"共 {len(exps)} 组实验，max_dist={args.max_dist:g}，"
-          f"要画 {', '.join(sorted(args.figs))}")
+    print(f"{len(exps)} experiments total, max_dist={args.max_dist:g}, "
+          f"plotting {', '.join(sorted(args.figs))}")
     rows = []
     for i, exp in enumerate(exps, 1):
         print(f"[{i}/{len(exps)}] {exp}")
@@ -844,8 +877,8 @@ def main():
 
     if args.summary and rows:
         pd.DataFrame(rows).to_csv(args.summary, index=False)
-        print(f"\n汇总已写入 {args.summary}")
-    print(f"\n完成 {len(rows)}/{len(exps)} 组实验")
+        print(f"\nSummary written to {args.summary}")
+    print(f"\nDone: {len(rows)}/{len(exps)} experiments")
     return 0 if rows else 1
 
 

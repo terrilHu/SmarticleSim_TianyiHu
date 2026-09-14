@@ -1,44 +1,50 @@
 """
-experiments.py  ─  成组的对比实验：多种 strategy × 多种 N_SMARTICLES。
+experiments.py  ─  Grouped comparison experiments: multiple strategies × multiple N_SMARTICLES.
 
-每个条件 = 一份 config 覆盖参数。驱动器把它写成一个覆盖文件，然后
-**起一个新的 Python 进程**跑 simulation.main()，最后把各条件的 summary 汇总。
+Each condition = one set of config overrides. The driver writes it out as an
+override file, then **spawns a new Python process** to run simulation.main(),
+and finally aggregates the summary across all conditions.
 
-为什么必须换进程
-----------------
-smarticle.py / spawn.py / analysis.py 都是 `from config import MAIN_LEN, ...`
-这种按值绑定，而这些量全部由 N_SMARTICLES 派生。进程内改 N_SMARTICLES 只会改
-config 模块里的那个名字，已经绑好的几何常量不会跟着变 —— 于是会拿 N=17 的机器人
-尺寸去跑 100 台的场地。每个条件一个新解释器是唯一可靠的做法（也顺带隔离了
-config.py 在 import 时消耗的全局 RNG）。
+Why a new process is required
+----------------------------
+smarticle.py / spawn.py / analysis.py all use `from config import MAIN_LEN, ...`
+style value binding, and these quantities are all derived from N_SMARTICLES.
+Changing N_SMARTICLES within a process only changes that name in the config
+module — the already-bound geometry constants won't follow, so you'd end up
+running a 100-robot arena with N=17 robot dimensions. A fresh interpreter per
+condition is the only reliable approach (it also conveniently isolates the
+global RNG that config.py consumes at import time).
 
-用法
+Usage
 ----
-    python experiments.py --list            # 只列出会跑哪些条件
-    python experiments.py --dry-run         # 生成覆盖文件但不跑
-    python experiments.py                   # 全跑
+    python experiments.py --list            # just list which conditions would run
+    python experiments.py --dry-run         # generate override files without running
+    python experiments.py                   # run everything
     python experiments.py --only n17_edge n50_edge
     python experiments.py --out-root datafile/compare0901
 
-也可以不用内置矩阵，直接给一串写好的 config 文件，依次每个跑一次实验：
+You can also skip the built-in matrix and directly supply a list of pre-written
+config files, running each one in turn:
 
     python experiments.py --configs conditions/a.py conditions/b.py
-    python experiments.py --configs "conditions/*.py"      # 通配符
-    python experiments.py --configs-from list.txt          # 每行一个路径
+    python experiments.py --configs "conditions/*.py"      # wildcard
+    python experiments.py --configs-from list.txt          # one path per line
 
-条件名默认取文件里的 EXP_NAME，没有就用文件名（去掉扩展名）。
-SMARTICLE_CONFIG 本身只能指一个文件 —— config.py 在 import 时执行一次，
-一个进程就是一次实验；"依次跑多个"这件事发生在驱动器这一层。
+The condition name defaults to EXP_NAME from the file, falling back to the
+filename (without extension) if absent. SMARTICLE_CONFIG itself can only point
+to a single file — config.py executes once at import time, so one process is
+one experiment; "running several in sequence" happens at the driver level.
 
-条件矩阵在下面的 STRATEGIES / POPULATIONS 里改；跑出来的目录结构是
+The condition matrix is edited below in STRATEGIES / POPULATIONS; the
+resulting directory structure is
 
-    <out_root>/<condition>/            <- 每个条件一组实验
-        config_snapshot.json           <- 这次实际用的全部参数
+    <out_root>/<condition>/            <- one set of experiments per condition
+        config_snapshot.json           <- all parameters actually used this run
         trial_0000/ trial_0001/ ...
-    <out_root>/_conditions/<name>.py   <- 该条件的覆盖文件(可复现)
-    <out_root>/summary.csv             <- 所有条件的 trial 汇总拼在一起
+    <out_root>/_conditions/<name>.py   <- override file for this condition (reproducible)
+    <out_root>/summary.csv             <- trial summaries from all conditions concatenated
 
-跑完直接接分析：
+Feed straight into analysis afterward:
     python batch_group_plots.py "<out_root>/*" --max-dist 65 --summary groups.csv
 """
 
@@ -52,10 +58,10 @@ import sys
 import time
 
 # =============================================================================
-# 条件矩阵 —— 改这里
+# Condition matrix — edit here
 # =============================================================================
 
-# 每种 N 对应的初始条件文件（IC 文件里的机器人数必须等于 N，run_trial 会检查）
+# Initial condition file for each N (robot count in the IC file must equal N; run_trial checks this)
 INIT_FILES = {
     17:  "init_conditions/init_conditions_200_p_N17.json",
     50:  "init_conditions/init_conditions_200_p_N50.json",
@@ -64,22 +70,25 @@ INIT_FILES = {
 
 POPULATIONS = [17, 50, 100]
 
-# 每个策略给出它自己那份 config 覆盖。名字会进目录名，别带空格。
+# Each strategy provides its own set of config overrides. The name goes into
+# the directory name, so no spaces.
 #
-# "baseline" 关掉运行时控制，全场同一条 COMMAND_ARRAY —— 对照组。
-# 其余几个都开 gait_control:strategy，区别只在 STRATEGY_SPEC。
-_MAX_DIST = 65.0        # 与实机一致；换 N 时想按体长缩放就在下面算
+# "baseline" disables runtime control, using the same COMMAND_ARRAY across the
+# whole arena — the control group. The rest all enable gait_control:strategy,
+# differing only in STRATEGY_SPEC.
+_MAX_DIST = 65.0        # matches the real robot; scale by body length below if N changes
 _LEAVE, _SMALL, _MID, _EDGE = 462, 862, -851, -426
 
 STRATEGIES = {
     "baseline": {
         "ENABLE_RUNTIME_GAIT_CONTROL": False,
-        # spec 用不到，但也一并清空：否则 config_snapshot.json 里会留着
-        # config.py 的默认 roles/group_rules，事后翻记录容易以为它生效了。
+        # spec isn't used here, but clear it too: otherwise config_snapshot.json
+        # would retain config.py's default roles/group_rules, which could be
+        # mistaken for being active when reviewing records later.
         "STRATEGY_SPEC": {"max_dist": _MAX_DIST, "leave_command": _LEAVE,
                           "group_rules": [], "roles": []},
     },
-    "groupsize": {                      # 只按分组规模发指令
+    "groupsize": {                      # commands based only on group size
         "ENABLE_RUNTIME_GAIT_CONTROL": True,
         "RUNTIME_GAIT_CONTROLLER": "gait_control:strategy",
         "STRATEGY_SPEC": {
@@ -92,7 +101,7 @@ STRATEGIES = {
             "roles": [],
         },
     },
-    "edge": {                           # 只按空间角色：边界 vs 内部
+    "edge": {                           # only by spatial role: boundary vs interior
         "ENABLE_RUNTIME_GAIT_CONTROL": True,
         "RUNTIME_GAIT_CONTROLLER": "gait_control:strategy",
         "STRATEGY_SPEC": {
@@ -104,7 +113,7 @@ STRATEGIES = {
             ],
         },
     },
-    "ends2": {                          # 最大团长轴两端各 2 台，盖过分组层
+    "ends2": {                          # 2 robots at each end of the largest cluster's major axis, overrides the group layer
         "ENABLE_RUNTIME_GAIT_CONTROL": True,
         "RUNTIME_GAIT_CONTROLLER": "gait_control:strategy",
         "STRATEGY_SPEC": {
@@ -122,14 +131,15 @@ STRATEGIES = {
     },
 }
 
-# 所有条件共用的设置
+# Settings shared by all conditions
 COMMON = {
     "N_TRIALS_GLOBAL": 5,
     "MAX_RUNTIME": 120.0,
-    # 必须是 "random" 或 "sequential"：INIT_SELECTION="explicit" 时 main() 会用
-    # len(INIT_INDICES) 覆盖掉 N_TRIALS_GLOBAL，每个条件的 trial 数就不是 5 了。
+    # Must be "random" or "sequential": with INIT_SELECTION="explicit", main()
+    # would override N_TRIALS_GLOBAL with len(INIT_INDICES), so each condition
+    # would no longer have 5 trials.
     "INIT_SELECTION": "random",
-    "RECORD_VIDEO": False,       # 成组实验先别录像，太占地方
+    "RECORD_VIDEO": False,       # skip video recording for grouped experiments, too much disk space
     "COVERAGE_ENABLED": True,
     "PARALLEL_WORKERS": 1,
 }
@@ -138,18 +148,18 @@ OUT_ROOT = os.path.join("datafile", "compare")
 
 
 # =============================================================================
-# 条件生成
+# Condition generation
 # =============================================================================
 
 def build_conditions(strategies=STRATEGIES, populations=POPULATIONS,
                      common=COMMON):
-    """-> [(name, overrides), ...]，strategy × N 的笛卡尔积。"""
+    """-> [(name, overrides), ...], the Cartesian product of strategy × N."""
     out = []
     for n, (sname, sover) in itertools.product(populations,
                                                strategies.items()):
         if n not in INIT_FILES:
-            raise ValueError(f"N={n} 没有对应的初始条件文件；"
-                             f"请在 INIT_FILES 里加一条")
+            raise ValueError(f"N={n} has no corresponding initial condition file; "
+                             f"please add one in INIT_FILES")
         name = f"n{n}_{sname}"
         ov = dict(common)
         ov.update(sover)
@@ -162,25 +172,27 @@ def build_conditions(strategies=STRATEGIES, populations=POPULATIONS,
 
 def conditions_from_files(paths):
     """
-    把一串 config 文件变成 [(name, overrides), ...]。
+    Turn a list of config files into [(name, overrides), ...].
 
-    用的是 config.py 自己那个加载函数，所以驱动器读到的覆盖项和 config.py
-    在子进程里读到的完全一致（.py / .json、BOM、注释的处理都不会分叉）。
+    Uses config.py's own loader function, so the overrides read by the driver
+    are exactly consistent with what config.py reads in the subprocess (no
+    divergence in .py / .json, BOM, or comment handling).
     """
-    from config import _load_override_file      # 与 config.py 共用同一份实现
+    from config import _load_override_file      # shares the same implementation as config.py
 
     out, seen = [], {}
     for path in paths:
         settings, meta = _load_override_file(path)
         ov = dict(settings)
         if "_snapshot" in meta:
-            # config_snapshot.json：派生量由输入参数重算，别写进条件文件
+            # config_snapshot.json: derived quantities are recomputed from
+            # input parameters, so don't write them into the condition file
             ov = {k: v for k, v in ov.items() if k not in DERIVED_KEYS}
         name = ov.get("EXP_NAME") or os.path.splitext(os.path.basename(path))[0]
         if name in seen:
             raise ValueError(
-                f"条件名 {name!r} 重复：{seen[name]} 和 {path}。"
-                f"给其中一个加上 EXP_NAME，否则输出会互相覆盖。")
+                f"Duplicate condition name {name!r}: {seen[name]} and {path}. "
+                f"Add an EXP_NAME to one of them, or the outputs will overwrite each other.")
         seen[name] = path
         ov["EXP_NAME"] = name
         ov["_source"] = os.path.abspath(path)
@@ -188,14 +200,15 @@ def conditions_from_files(paths):
     return out
 
 
-# config.py 末尾拒绝直接覆盖的那些量；快照里有，条件文件里不该有
+# Quantities config.py refuses to let be overridden directly at the end of the
+# file; present in the snapshot, but shouldn't be in a condition file
 DERIVED_KEYS = {
     "W", "H", "SCALE", "INNER_R", "INNER_R_UNSCALED", "WALL_THICK",
     "WALL_SEGMENTS", "MAIN_LEN", "MAIN_W", "ARM_LEN", "ARM_W",
     "RING_N_SIDES", "RING_MASS", "L", "L_s", "S", "MASS_MAIN", "MASS_ARM",
 }
 
-# 逐条写死会跟着 config.py 漂移，所以直接问 config.py 要
+# Hardcoding this list would drift out of sync with config.py, so ask config.py directly
 def _derived_keys():
     try:
         import config
@@ -206,29 +219,32 @@ def _derived_keys():
 
 def minimal_from_snapshot(snapshot_path, keep_all=False):
     """
-    把一次实验的 config_snapshot.json 变成一份**精简、好手改**的覆盖参数。
+    Turn one experiment's config_snapshot.json into a **minimal, easy-to-hand-edit**
+    set of overrides.
 
-    快照是完整记录（100 多个键，还含派生量），直接拿来当条件文件能跑，但没法读
-    也没法改。这里只留下真正把这次实验和 config.py 默认值区分开的那些键：
+    The snapshot is a complete record (100+ keys, including derived quantities);
+    it can be used directly as a condition file, but it's hard to read or edit.
+    This keeps only the keys that actually distinguish this experiment from
+    config.py's defaults:
 
-      - 去掉派生量（会由输入参数重算）
-      - 去掉和 config.py 当前默认值相同的键（keep_all=True 可保留）
-      - COMMAND_ARRAY 如果全场一致，压成简写字符串 "a-462"
+      - drops derived quantities (recomputed from input parameters)
+      - drops keys that match config.py's current defaults (keep_all=True keeps them)
+      - if COMMAND_ARRAY is uniform across the arena, compresses it to a short string like "a-462"
 
-    剩下的通常只有十来行，改一改就是下一个条件。
+    What's left is usually only about a dozen lines — tweak it to make the next condition.
     """
     from config import _load_override_file
 
     settings, meta = _load_override_file(snapshot_path)
     if "_snapshot" not in meta:
-        print(f"[warn] {snapshot_path} 没有 _snapshot 标记，"
-              f"可能不是 config_snapshot.json（照样按快照处理）")
+        print(f"[warn] {snapshot_path} has no _snapshot marker, "
+              f"might not be a config_snapshot.json (treating it as a snapshot anyway)")
 
     derived = _derived_keys()
     out = {k: v for k, v in settings.items() if k not in derived}
 
     if not keep_all:
-        # 和默认值相同的键没必要留：config.py 本来就是这个值
+        # No need to keep keys matching the default: that's already config.py's value
         import subprocess
         import sys as _sys
         code = ("import json,sys,types\n"
@@ -239,7 +255,7 @@ def minimal_from_snapshot(snapshot_path, keep_all=False):
                 "and isinstance(v, (int, float, bool, str, list, dict, type(None)))}, "
                 "default=str))\n" % os.path.dirname(os.path.abspath(__file__)))
         env = dict(os.environ)
-        env.pop("SMARTICLE_CONFIG", None)      # 要的是纯默认值
+        env.pop("SMARTICLE_CONFIG", None)      # we want the plain defaults
         env["PYTHONIOENCODING"] = "utf-8"
         r = subprocess.run([_sys.executable, "-c", code], capture_output=True,
                            text=True, encoding="utf-8", errors="replace", env=env,
@@ -252,9 +268,9 @@ def minimal_from_snapshot(snapshot_path, keep_all=False):
             out = {k: v for k, v in out.items()
                    if k not in defaults or defaults[k] != v}
         else:
-            print("[warn] 读不到 config.py 默认值，保留全部非派生键")
+            print("[warn] could not read config.py defaults, keeping all non-derived keys")
 
-    # 全场同一条指令时，压成简写；config.py 会把它展开回长度 N 的列表
+    # When the whole arena shares one command, compress it to shorthand; config.py expands it back to a length-N list
     cmds = settings.get("COMMAND_ARRAY")
     if isinstance(cmds, list) and cmds and len(set(cmds)) == 1:
         out["COMMAND_ARRAY"] = f"a{cmds[0]:+d}"
@@ -262,12 +278,12 @@ def minimal_from_snapshot(snapshot_path, keep_all=False):
 
 
 def expand_config_paths(patterns):
-    """展开通配符并保序去重；顺序就是实验执行顺序。"""
+    """Expand wildcards and deduplicate while preserving order; order is experiment execution order."""
     out, seen = [], set()
     for pat in patterns:
         hits = sorted(glob.glob(pat)) or ([pat] if os.path.isfile(pat) else [])
         if not hits:
-            raise ValueError(f"找不到 config 文件: {pat}")
+            raise ValueError(f"config file not found: {pat}")
         for h in hits:
             h = os.path.normpath(h)
             if h not in seen:
@@ -277,33 +293,34 @@ def expand_config_paths(patterns):
 
 
 def write_condition(path, name, overrides):
-    """把覆盖参数写成一个可直接 SMARTICLE_CONFIG= 使用的 .py 文件。"""
+    """Write the overrides out as a .py file usable directly with SMARTICLE_CONFIG=."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    # 文档字符串里的路径一律换成正斜杠：Windows 路径原样写进普通字符串会
-    # 被当成转义序列（C:\Users 里的 \U 直接让生成的文件语法错误），
-    # 正斜杠既安全，Windows 也照样认。
+    # Always convert paths in the docstring to forward slashes: a Windows path
+    # written as-is into a plain string gets treated as an escape sequence
+    # (the \U in C:\Users directly causes a syntax error in the generated file);
+    # forward slashes are safe and Windows still accepts them.
     shown = os.path.abspath(path).replace('\\', '/')
     with open(path, "w", encoding="utf-8") as f:
-        f.write(f'"""对比实验条件 {name} —— 由 experiments.py 生成。\n\n'
-                f'单独重跑这个条件:\n'
+        f.write(f'"""Comparison experiment condition {name} -- generated by experiments.py.\n\n'
+                f'To rerun this condition alone:\n'
                 f'    SMARTICLE_CONFIG={shown} python simulation.py\n'
                 f'"""\n\n')
         src = overrides.get("_source")
         if src:
-            f.write(f"# 来自 {src.replace(chr(92), '/')}\n\n")
+            f.write(f"# From {src.replace(chr(92), '/')}\n\n")
         for k in sorted(overrides):
             if k.startswith("_"):
-                continue          # _source 只是驱动器的记账，不是 config 参数
+                continue          # _source is just driver bookkeeping, not a config parameter
             f.write(f"{k} = {pprint.pformat(overrides[k], width=76, indent=4)}\n")
     return path
 
 
 # =============================================================================
-# 运行
+# Run
 # =============================================================================
 
 def run_condition(name, cfg_path, out_root, env=None, timeout=None):
-    """新起一个解释器跑这个条件。返回 (returncode, 用时秒)。"""
+    """Spawn a fresh interpreter to run this condition. Returns (returncode, elapsed seconds)."""
     env = dict(os.environ if env is None else env)
     env["SMARTICLE_CONFIG"] = os.path.abspath(cfg_path)
     env.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -316,7 +333,7 @@ def run_condition(name, cfg_path, out_root, env=None, timeout=None):
 
 
 def collect_summaries(out_root, conditions, path):
-    """把各条件的 *_summary.csv 拼成一张表，加上 exp / n / strategy 三列。"""
+    """Concatenate each condition's *_summary.csv into one table, adding exp / n / strategy columns."""
     import pandas as pd
     rows = []
     for name, ov in conditions:
@@ -338,29 +355,29 @@ def collect_summaries(out_root, conditions, path):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="成组对比实验：strategy × N_SMARTICLES",
+        description="Grouped comparison experiments: strategy x N_SMARTICLES",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out-root", default=OUT_ROOT,
-                    help=f"输出根目录 (默认 {OUT_ROOT})")
+                    help=f"Output root directory (default {OUT_ROOT})")
     ap.add_argument("--from-snapshot", default=None,
-                    help="把一次实验的 config_snapshot.json 转成精简的条件文件")
+                    help="Turn one experiment's config_snapshot.json into a minimal condition file")
     ap.add_argument("-o", "--output", default=None,
-                    help="--from-snapshot 的输出路径 (默认打印到屏幕)")
+                    help="Output path for --from-snapshot (default: print to screen)")
     ap.add_argument("--keep-all", action="store_true",
-                    help="--from-snapshot 时保留所有非派生键，不只留与默认值不同的")
+                    help="With --from-snapshot, keep all non-derived keys instead of only those differing from defaults")
     ap.add_argument("--configs", nargs="+", default=None,
-                    help="不用内置矩阵，依次跑这些 config 文件（可用通配符）")
+                    help="Skip the built-in matrix and run these config files in turn (wildcards allowed)")
     ap.add_argument("--configs-from", default=None,
-                    help="从文件读 config 路径列表，每行一个（# 开头为注释）")
+                    help="Read a list of config paths from a file, one per line (# prefix for comments)")
     ap.add_argument("--only", nargs="+", default=None,
-                    help="只跑这些条件名")
+                    help="Only run these condition names")
     ap.add_argument("--skip-existing", action="store_true",
-                    help="已经有输出目录的条件直接跳过")
-    ap.add_argument("--list", action="store_true", help="列出条件后退出")
+                    help="Skip conditions that already have an output directory")
+    ap.add_argument("--list", action="store_true", help="List conditions and exit")
     ap.add_argument("--dry-run", action="store_true",
-                    help="生成覆盖文件但不真的跑")
+                    help="Generate override files without actually running")
     ap.add_argument("--timeout", type=float, default=None,
-                    help="单个条件的超时秒数")
+                    help="Timeout in seconds for a single condition")
     args = ap.parse_args()
 
     if args.from_snapshot:
@@ -370,10 +387,10 @@ def main():
                     os.path.abspath(args.from_snapshot))) or "from_snapshot")
         if args.output:
             write_condition(args.output, name, ov)
-            print(f"{len(ov)} 个参数 -> {args.output}")
-            print(f"改完直接跑: python experiments.py --configs {args.output}")
+            print(f"{len(ov)} parameters -> {args.output}")
+            print(f"Edit then run directly: python experiments.py --configs {args.output}")
         else:
-            print(f"# 由 {args.from_snapshot} 精简而来（{len(ov)} 个参数）")
+            print(f"# Reduced from {args.from_snapshot} ({len(ov)} parameters)")
             for k in sorted(ov):
                 print(f"{k} = {pprint.pformat(ov[k], width=76, indent=4)}")
         return 0
@@ -386,7 +403,7 @@ def main():
     if patterns:
         paths = expand_config_paths(patterns)
         conditions = conditions_from_files(paths)
-        print(f"来自 {len(paths)} 个 config 文件")
+        print(f"From {len(paths)} config files")
     else:
         conditions = build_conditions()
 
@@ -394,25 +411,25 @@ def main():
         want = set(args.only)
         unknown = want - {n for n, _ in conditions}
         if unknown:
-            ap.error(f"未知条件 {sorted(unknown)}; "
-                     f"可选 {[n for n, _ in conditions]}")
+            ap.error(f"Unknown condition(s) {sorted(unknown)}; "
+                     f"available: {[n for n, _ in conditions]}")
         conditions = [(n, o) for n, o in conditions if n in want]
 
     if args.list:
-        print(f"{len(conditions)} 个条件:")
+        print(f"{len(conditions)} conditions:")
         for n, o in conditions:
-            # 用户给的 config 文件不一定写全这些键，缺的就显示 config.py 的默认
+            # User-supplied config files may not set all these keys; show config.py's default for missing ones
             print(f"  {n:<20} "
-                  f"N={o.get('N_SMARTICLES', '默认')!s:<6} "
-                  f"trials={o.get('N_TRIALS_GLOBAL', '默认')!s:<6} "
-                  f"runtime={o.get('MAX_RUNTIME', '默认')!s:<7} "
+                  f"N={o.get('N_SMARTICLES', 'default')!s:<6} "
+                  f"trials={o.get('N_TRIALS_GLOBAL', 'default')!s:<6} "
+                  f"runtime={o.get('MAX_RUNTIME', 'default')!s:<7} "
                   f"{'strategy' if o.get('ENABLE_RUNTIME_GAIT_CONTROL') else 'baseline'}"
                   f"{'  <- ' + os.path.basename(o['_source']) if o.get('_source') else ''}")
         return 0
 
     cfg_dir = os.path.join(args.out_root, "_conditions")
     os.makedirs(cfg_dir, exist_ok=True)
-    print(f"{len(conditions)} 个条件 -> {args.out_root}")
+    print(f"{len(conditions)} conditions -> {args.out_root}")
 
     ok, failed, skipped = [], [], []
     t_start = time.time()
@@ -423,11 +440,11 @@ def main():
 
         done = os.path.join(args.out_root, name)
         if args.skip_existing and os.path.isdir(done):
-            print(f"[{i}/{len(conditions)}] {name}: 已存在，跳过")
+            print(f"[{i}/{len(conditions)}] {name}: already exists, skipping")
             skipped.append(name)
             continue
         if args.dry_run:
-            print(f"[{i}/{len(conditions)}] {name}: 覆盖文件已写 {cfg_path}")
+            print(f"[{i}/{len(conditions)}] {name}: override file written {cfg_path}")
             continue
 
         print(f"\n[{i}/{len(conditions)}] {name}  "
@@ -440,35 +457,35 @@ def main():
             failed.append(name)
             continue
         if rc == 0:
-            print(f"  完成，用时 {secs/60:.1f} 分钟")
+            print(f"  done, took {secs/60:.1f} min")
             ok.append(name)
         else:
-            print(f"  [FAIL] 退出码 {rc}")
+            print(f"  [FAIL] exit code {rc}")
             failed.append(name)
 
     if args.dry_run:
-        print(f"\n覆盖文件都写在 {cfg_dir}")
+        print(f"\nAll override files written to {cfg_dir}")
         return 0
 
-    print(f"\n成功 {len(ok)}/{len(conditions)}，失败 {len(failed)}，"
-          f"跳过 {len(skipped)}，总用时 {(time.time()-t_start)/60:.1f} 分钟")
+    print(f"\nSucceeded {len(ok)}/{len(conditions)}, failed {len(failed)}, "
+          f"skipped {len(skipped)}, total time {(time.time()-t_start)/60:.1f} min")
     if failed:
-        print(f"失败的条件: {failed}")
+        print(f"Failed conditions: {failed}")
 
     try:
         df = collect_summaries(args.out_root, conditions,
                                os.path.join(args.out_root, "summary.csv"))
         if df is not None:
-            print(f"汇总: {os.path.join(args.out_root, 'summary.csv')} "
-                  f"({len(df)} 行)")
+            print(f"Summary: {os.path.join(args.out_root, 'summary.csv')} "
+                  f"({len(df)} rows)")
             cols = [c for c in ("condition", "n_smarticles", "strategy",
                                 "k_steady", "final_rg") if c in df.columns]
             if cols:
                 print(df.groupby(["condition"])[cols[3:]].mean().to_string())
     except Exception as e:
-        print(f"[WARN] 汇总失败: {type(e).__name__}: {e}")
+        print(f"[WARN] summary failed: {type(e).__name__}: {e}")
 
-    print(f"\n接着画分组图:\n"
+    print(f"\nNext, plot grouped figures:\n"
           f"    python batch_group_plots.py \"{args.out_root}/*\" "
           f"--max-dist 65 --summary {args.out_root}/groups.csv")
     return 0 if not failed else 1

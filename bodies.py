@@ -38,13 +38,13 @@ _GEOM_KEYS = set(_DEFAULT_BASE.keys())
 _MASS_KEYS = {"mass_main", "mass_arm"}
 
 def gait_for_smarticle(sm) -> int:
-    """根据机器人的实际几何属性返回对应的 COMMAND int。"""
+    """Return the corresponding COMMAND int based on the robot's actual geometry."""
     if not getattr(cfg, "ENABLE_HETEROGENEOUS_BODIES", False):
-        return None  # 让调用方用 COMMAND_ARRAY[i]
+        return None  # let the caller fall back to COMMAND_ARRAY[i]
 
-    arm_len = sm.arm_len  # 从实例读，和 IC 文件加载还是新 spawn 无关
+    arm_len = sm.arm_len  # read from the instance, regardless of whether it was loaded from an IC file or freshly spawned
 
-    # 和 BODY_TYPES 里的阈值对应，而不是查 BODY_ASSIGNMENT
+    # matched against the thresholds in BODY_TYPES, rather than looking up BODY_ASSIGNMENT
     if arm_len >= _scaled_len(cfg.BASE_ARM_LEN) * 1.3:   # long_arm
         return cfg.GAIT_BY_TYPE.get("long_arm", None)
     elif arm_len <= _scaled_len(cfg.BASE_ARM_LEN) * 0.75: # short_arm
@@ -130,8 +130,8 @@ def body_params_from_dict(d: dict) -> dict:
 
 def arm_colors(sm):
     if sm.arm_len >= 100:        # long_arm
-        return (255, 140, 0, 255), (255, 200, 100, 255)   # 橙系
+        return (255, 140, 0, 255), (255, 200, 100, 255)   # orange family
     elif sm.arm_len <= 50:       # short_arm
-        return (100, 200, 100, 255), (180, 230, 180, 255)  # 绿系
+        return (100, 200, 100, 255), (180, 230, 180, 255)  # green family
     else:                        # default
-        return (255, 100, 100, 255), (100, 100, 255, 255)  # 原红/蓝
+        return (255, 100, 100, 255), (100, 100, 255, 255)  # original red/blue

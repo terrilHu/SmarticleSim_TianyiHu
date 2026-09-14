@@ -372,8 +372,8 @@ def run_batch(batch: dict, ALL_INIT: list, init_cursor_start: int,
 
                 # Derive naming parameters from the command array
                 init_phases, omega, ampli = _naming_params_from_commands(cmd_array)
-                # 扫描的每个格子要能从目录名认出自己的参数槽位，
-                # batch/*.py 的 parse_exp_name() 依赖 W1f/A1a 这些字段。
+                # Each swept cell must be identifiable from its directory name;
+                # batch/*.py's parse_exp_name() relies on fields like W1f/A1a.
                 exp_name  = generate_param_name(
                     N_SMARTICLES, init_phases, omega=omega, amplitude=ampli,
                     prefix=f"batch_{name}",

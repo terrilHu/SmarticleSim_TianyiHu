@@ -1,5 +1,5 @@
 """
-gait.py  ─  Per-robot gait (运动模式) state and runtime gait control.
+gait.py  ─  Per-robot gait (motion pattern) state and runtime gait control.
 
 This module owns three things that used to be inlined in simulation.py:
 

@@ -1,45 +1,57 @@
 """
-sweep_coverage.py  ─  手臂扫掠覆盖率 k = A' / A_total。
+sweep_coverage.py  ─  arm sweep coverage ratio k = A' / A_total.
 
-定义
-----
-每台机器人的**活动范围**由三块组成：中心 body 的矩形，加上两端手臂各自扫出的
-一个扇形。左臂铰接在 body 局部坐标 (-main_len/2, 0)，关节角为 0 时指向 -x；
-右臂铰接在 (+main_len/2, 0)，指向 +x。关节角在 [-A, +A] 之间摆动，所以每条臂
-扫出一个以肩点为圆心、半径 arm_len、张角 2A 的扇形。
+Definition
+----------
+Each robot's **footprint** consists of three pieces: the central body's rectangle,
+plus one sector swept by each arm. The left arm is hinged at body-local coords
+(-main_len/2, 0) and points -x when the joint angle is 0; the right arm is hinged
+at (+main_len/2, 0), pointing +x. The joint angle swings between [-A, +A], so each
+arm sweeps a sector centered at its shoulder point, radius arm_len, half-angle 2A.
 
     A_0 = main_len * main_w + (A1 + A2) * arm_len^2
 
-半角 A 的扇形面积是 (1/2)*r^2*(2A) = A*r^2，所以两臂合起来是 (A1+A2)*arm_len^2。
-A_0 只由振幅(和固定的几何)决定 —— 位置和朝向都不影响它。
+The area of a sector with half-angle A is (1/2)*r^2*(2A) = A*r^2, so the two arms
+together contribute (A1+A2)*arm_len^2. A_0 depends only on amplitude (and the
+fixed geometry) — position and heading don't affect it.
 
-    A'      = 全部 n 个活动范围在平面上的**并集**面积（重叠只算一次，A' <= n*A_0）
-    A_total = 环的内部面积
+    A'      = area of the **union** of all n footprints in the plane (overlap
+              counted once, A' <= n*A_0)
+    A_total = interior area of the ring
     k       = A' / A_total
 
-k 越大表示活动范围把场地占得越满、彼此重叠越多，交互和碰撞越剧烈。
+Larger k means footprints fill more of the arena and overlap more, i.e. more
+intense interaction and collisions.
 
-并集**不按环的边缘裁剪**：靠墙的机器人扇形伸到墙外的部分照样计入 A'。
-因此 k 可以略大于 1 —— 分母是环的面积，分子却能覆盖到环外最多一个
-footprint_radius 的范围。画布也据此比环大出这一圈，否则并集会在画布边界上
-被悄悄截断（那等于换了个地方裁剪）。
+The union is **not clipped to the ring's edge**: for a robot near the wall, the
+part of its sector extending past the wall still counts toward A'. So k can
+slightly exceed 1 — the denominator is the ring's area, but the numerator can
+cover up to one footprint_radius beyond the ring. The canvas is sized larger than
+the ring by that same margin for this reason, otherwise the union would get
+silently truncated at the canvas boundary (which would just move the clipping
+problem elsewhere).
 
-为什么 A <= pi/2 时 A_0 是精确的
+Why A_0 is exact when A <= pi/2
 --------------------------------
-扇形以 body 端点为圆心、绕 ±x 向外张开，A <= 90 度时整个扇形落在 x <= -main_len/2
-(或 x >= +main_len/2) 的半平面里，而 body 矩形占的是 |x| <= main_len/2，
-所以三块两两不重叠，面积可以直接相加。JOINT_LIMIT_DEG 是 85 度，
-振幅表最大 pi/2，都在这个范围内。A > pi/2 时上式会高估，函数会给出警告。
+The sector is centered at a body endpoint and opens outward along ±x; when
+A <= 90 degrees the whole sector lies in the half-plane x <= -main_len/2 (or
+x >= +main_len/2), while the body rectangle occupies |x| <= main_len/2, so the
+three pieces are pairwise non-overlapping and areas can simply be summed.
+JOINT_LIMIT_DEG is 85 degrees and the amplitude table maxes out at pi/2, both
+within this range. For A > pi/2 the formula overestimates and the function emits
+a warning.
 
-并集怎么算
-----------
-n 个「矩形 + 两扇形」的精确并集需要 shapely 一类的几何库，环境里没有，
-所以用**栅格化**：在环的包围盒上铺一张 cell x cell 的布尔画布，逐个机器人把
-自己的活动范围 OR 进去，最后数被覆盖的格子。误差是 O(周长 * cell)，
-cell 越小越准；calibrate 里实测了收敛情况，见 COVERAGE_CELL 的注释。
+How the union is computed
+--------------------------
+An exact union of n "rectangle + two sectors" shapes needs a geometry library like
+shapely, which isn't available here, so it's done by **rasterization**: lay a
+cell x cell boolean canvas over the ring's bounding box, OR each robot's footprint
+into it, and count covered cells at the end. Error is O(perimeter * cell); smaller
+cell is more accurate — calibrate measures the convergence empirically, see the
+comment on COVERAGE_CELL.
 
-只在每个机器人自己的包围盒范围内做判定，所以每帧代价是
-n * (2*L_s/cell)^2 个格点，而不是整张画布 x n。
+Testing is only done within each robot's own bounding box, so per-frame cost is
+n * (2*L_s/cell)^2 grid points, not the whole canvas x n.
 """
 
 import math
@@ -48,48 +60,52 @@ import numpy as np
 
 
 # =============================================================================
-# 单台机器人：解析面积与栅格判定
+# Single robot: analytical area and grid test
 # =============================================================================
 
 def footprint_area(sm) -> float:
     """
-    A_0 —— 一台机器人活动范围的解析面积（body 矩形 + 两个扇形）。
+    A_0 — analytical area of a single robot's footprint (body rectangle + two sectors).
 
-    读的是实例上**当前**的 A1/A2，所以运行时改了步态振幅，A_0 会跟着变。
+    Reads the instance's **current** A1/A2, so if gait amplitude changes at
+    runtime, A_0 changes with it.
     """
     return float(sm.main_len * sm.main_w
                  + (sm.A1 + sm.A2) * sm.arm_len ** 2)
 
 
 def footprint_radius(sm) -> float:
-    """活动范围的外接半径（以 body 中心为原点），用来算包围盒。"""
-    # 最远的点是臂尖：肩点到中心 main_len/2，再加臂长。
+    """Circumscribing radius of the footprint (origin at body center), used for the bounding box."""
+    # The farthest point is the arm tip: shoulder to center is main_len/2, plus arm length.
     return 0.5 * sm.main_len + sm.arm_len
 
 
 def _mask_local(u, v, main_len, main_w, arm_len, A1, A2):
     """
-    在机器人体坐标系里判定格点是否落在活动范围内。
+    Test whether grid points fall inside the footprint, in the robot's body frame.
 
-    u, v 是同形状的数组（体坐标，u 沿 body 长轴）。返回同形状的布尔数组。
+    u, v are arrays of the same shape (body coordinates, u along the body's long axis).
+    Returns a boolean array of the same shape.
 
-    扇形判定不开方：点 (ru, rv) 相对肩点，落在朝 -x、半角 A 的扇形内
-    等价于  ru <= 0  且  rv^2 * cos^2(A) <= ru^2 * sin^2(A)  且  ru^2+rv^2 <= r^2。
-    A = pi/2 时 cos = 0，条件退化成半圆盘；A = 0 时退化成一条线段（零面积）。
-    两种极端都自然成立，不用特判。
+    Sector test avoids a square root: point (ru, rv) relative to the shoulder point
+    falls inside a sector opening toward -x with half-angle A iff
+    ru <= 0  and  rv^2 * cos^2(A) <= ru^2 * sin^2(A)  and  ru^2+rv^2 <= r^2.
+    When A = pi/2, cos = 0 and the condition degenerates to a half-disk; when A = 0
+    it degenerates to a line segment (zero area). Both extremes hold naturally, no
+    special-casing needed.
     """
     half_len = 0.5 * main_len
     inside = (np.abs(u) <= half_len) & (np.abs(v) <= 0.5 * main_w)
 
     r2 = arm_len * arm_len
 
-    # 左臂：肩点 (-half_len, 0)，朝 -x
+    # Left arm: shoulder at (-half_len, 0), pointing -x
     ru = u + half_len
     c2, s2 = math.cos(A1) ** 2, math.sin(A1) ** 2
     inside |= ((ru <= 0.0) & (ru * ru + v * v <= r2)
                & (v * v * c2 <= ru * ru * s2))
 
-    # 右臂：肩点 (+half_len, 0)，朝 +x
+    # Right arm: shoulder at (+half_len, 0), pointing +x
     qu = u - half_len
     c2, s2 = math.cos(A2) ** 2, math.sin(A2) ** 2
     inside |= ((qu >= 0.0) & (qu * qu + v * v <= r2)
@@ -99,11 +115,11 @@ def _mask_local(u, v, main_len, main_w, arm_len, A1, A2):
 
 
 # =============================================================================
-# 环
+# Ring
 # =============================================================================
 
 def ring_area(inner_r, shape="circle", n_sides=None) -> float:
-    """A_total —— 环内部面积。圆是 pi*R^2；正 n 边形(外接半径 R)是 (n/2)R^2 sin(2pi/n)。"""
+    """A_total — interior area of the ring. Circle is pi*R^2; regular n-gon (circumradius R) is (n/2)R^2 sin(2pi/n)."""
     if (shape or "circle").lower() == "polygon":
         n = max(3, int(n_sides))
         return 0.5 * n * inner_r * inner_r * math.sin(2.0 * math.pi / n)
@@ -111,14 +127,15 @@ def ring_area(inner_r, shape="circle", n_sides=None) -> float:
 
 
 # =============================================================================
-# 覆盖率
+# Coverage ratio
 # =============================================================================
 
 class CoverageMeter:
     """
-    反复计算 k 的对象：画布和环掩膜只建一次，之后每帧复用。
+    An object for computing k repeatedly: the canvas and ring mask are built once
+    and reused every frame after that.
 
-    用法：
+    Usage:
         meter = CoverageMeter(center, INNER_R, RING_SHAPE, RING_N_SIDES, cell=2.0)
         k, info = meter.measure(smarticles)
     """
@@ -126,15 +143,19 @@ class CoverageMeter:
     def __init__(self, center, inner_r, ring_shape="circle", n_sides=None,
                  cell=2.0):
         """
-        cell  栅格边长(像素)。越小越准，代价按 1/cell^2 增长。
+        cell  grid cell size (pixels). Smaller is more accurate, cost grows as 1/cell^2.
 
-        画布在 measure() 里按**实际** footprint 的包围盒开：只会长大，不会缩，
-        所以稳态下每个 trial 至多重开几次。格点始终锚在 (cx-R, cy-R) 这条
-        栅格上、pad 取整格数，因此扩张不会改变格点相位 —— k 序列不会在
-        重开的那一帧出现台阶。
+        The canvas is sized in measure() to the **actual** footprints' bounding
+        box: it only grows, never shrinks, so at steady state each trial resizes
+        it at most a few times. Grid points are always anchored to the (cx-R, cy-R)
+        lattice, and pad is rounded up to whole cells, so growing the canvas never
+        shifts grid-point phase — the k sequence won't show a step on the frame
+        where the canvas resizes.
 
-        自动定尺寸是为了保证「不裁剪」是真的：按环半径加一个固定余量开画布的话，
-        跑到余量之外的机器人会被画布边界悄悄切掉，那等于换了个地方裁剪。
+        Auto-sizing is what makes "no clipping" actually true: if the canvas were
+        sized from the ring radius plus a fixed margin, robots that stray past
+        that margin would get silently cut off at the canvas boundary — which
+        would just move the clipping problem elsewhere.
         """
         self.cx, self.cy = float(center[0]), float(center[1])
         self.inner_r = float(inner_r)
@@ -152,11 +173,12 @@ class CoverageMeter:
 
     def _ensure_canvas(self, need_pad):
         """
-        保证画布覆盖 (cx, cy) 周围 inner_r + need_pad 的方框。
+        Ensure the canvas covers the box of inner_r + need_pad around (cx, cy).
 
-        pad 向上取到整格数：x0 = cx - R - pad，pad 增加整格数时原来的格点
-        仍然是格点(下标平移而已)，所以扩张前后同一个 footprint 落在相同的
-        格子上，A' 不会因为重开画布而跳变。
+        pad is rounded up to a whole number of cells: x0 = cx - R - pad; when pad
+        grows by whole cells the original grid points remain grid points (just an
+        index shift), so the same footprint lands on the same cells before and
+        after growth, and A' won't jump when the canvas resizes.
         """
         if self._canvas is not None and need_pad <= self._pad:
             return
@@ -168,33 +190,36 @@ class CoverageMeter:
         self.y0 = self.cy - half
         self.nx = int(math.ceil(2.0 * half / cell)) + 1
         self.ny = self.nx
-        # 格点中心坐标（一维），二维用广播拼出来，省一张 nx*ny 的浮点数组
+        # Grid point center coordinates (1D); combine into 2D via broadcasting to
+        # avoid allocating a full nx*ny float array
         self._xs = self.x0 + (np.arange(self.nx) + 0.5) * cell
         self._ys = self.y0 + (np.arange(self.ny) + 0.5) * cell
         self._canvas = np.zeros((self.ny, self.nx), dtype=bool)
 
-    # ── 主接口 ───────────────────────────────────────────────────────────────
+    # ── Main interface ───────────────────────────────────────────────────────
 
     def measure(self, smarticles):
         """
-        返回 (k, info)。info 里有：
-            A_union       并集面积（栅格估计，不按环裁剪）
-            A0_sum        sum(A_0)，按定义的解析值
-            A0_sum_raster sum(A_0) 的栅格值 —— 和 A_union 同一套离散化
-            A_total       环面积（解析值）
-            overlap       1 - A_union / A0_sum_raster，重叠掉的比例
-            k_naive       A0_sum / A_total，忽略重叠时的上界
+        Returns (k, info). info contains:
+            A_union       union area (rasterized estimate, not clipped to the ring)
+            A0_sum        sum(A_0), the analytical value by definition
+            A0_sum_raster rasterized value of sum(A_0) — same discretization as A_union
+            A_total       ring area (analytical value)
+            overlap       1 - A_union / A0_sum_raster, fraction lost to overlap
+            k_naive       A0_sum / A_total, the upper bound ignoring overlap
 
-        overlap 用的是 A0_sum_raster 而不是解析的 A0_sum：两者都带同样的
-        栅格误差，相除时抵消。拿栅格的 A_union 去比解析的 A0_sum 会留下
-        1~2% 的系统偏差 —— 实测两台完全分开的机器人会报出 1.8% 的"重叠"。
+        overlap uses A0_sum_raster rather than the analytical A0_sum: both carry
+        the same rasterization error, which cancels out in the ratio. Comparing
+        the rasterized A_union against the analytical A0_sum would leave a 1~2%
+        systematic bias — empirically, two fully separated robots would report
+        1.8% "overlap".
         """
         if not len(smarticles):
             return 0.0, {"A_union": 0.0, "A0_sum": 0.0, "A0_sum_raster": 0.0,
                          "A_total": self.A_total, "overlap": 0.0,
                          "k_naive": 0.0}
 
-        # 先量出所有 footprint 的包围盒，再决定画布要多大
+        # Measure all footprints' bounding boxes first, then decide the canvas size
         plan = []
         need = 0.0
         for sm in smarticles:
@@ -218,7 +243,7 @@ class CoverageMeter:
         for sm, px, py, psi, rad in plan:
             A0_sum += footprint_area(sm)
 
-            # 该机器人在画布上的索引窗口（含一格余量）
+            # This robot's index window on the canvas (with one cell of margin)
             i0 = int(math.floor((px - rad - x0) / cell))
             i1 = int(math.ceil((px + rad - x0) / cell)) + 1
             j0 = int(math.floor((py - rad - y0) / cell))
@@ -228,20 +253,21 @@ class CoverageMeter:
             i1 = nx if i1 > nx else i1
             j1 = ny if j1 > ny else j1
             if i0 >= i1 or j0 >= j1:
-                continue                      # 完全在画布外
+                continue                      # entirely outside the canvas
 
             dx = self._xs[i0:i1][None, :] - px
             dy = self._ys[j0:j1][:, None] - py
 
-            # 转到体坐标：绕 -psi 旋转
+            # Convert to body coordinates: rotate by -psi
             c, s = math.cos(psi), math.sin(psi)
             u =  dx * c + dy * s
             v = -dx * s + dy * c
 
             mask = _mask_local(u, v, sm.main_len, sm.main_w,
                                sm.arm_len, sm.A1, sm.A2)
-            # 这一台单独占的格数，顺手数掉：mask 本来就算出来了，
-            # 用它算 overlap 才和 A_union 同一套离散化。
+            # Count this robot's own cell count while we're at it: mask is already
+            # computed, and using it keeps the overlap calc on the same
+            # discretization as A_union.
             A0_cells += int(mask.sum())
             canvas[j0:j1, i0:i1] |= mask
 
@@ -261,6 +287,6 @@ class CoverageMeter:
 
 def coverage_ratio(smarticles, center, inner_r, ring_shape="circle",
                    n_sides=None, cell=2.0):
-    """一次性算一帧的 k（内部就是建一个 CoverageMeter）。"""
+    """Compute k for a single frame (internally just builds a CoverageMeter)."""
     return CoverageMeter(center, inner_r, ring_shape, n_sides,
                          cell=cell).measure(smarticles)
