@@ -1,10 +1,104 @@
 """
 config.py  ─  All global parameters for the Smarticle simulation.
 Edit this file to change experiment settings.
+
+批量对比实验：把要改的参数写进一个覆盖文件，用环境变量 SMARTICLE_CONFIG 指过来，
+本文件在计算派生量**之前**就会读它。experiments.py 就是这么驱动一组条件的。
+
+    SMARTICLE_CONFIG=conditions/n50_edge.py  python simulation.py
+
+覆盖文件可以是 .py（一串 `NAME = value`，语法和本文件一样，元组/None 都能写）
+或 .json。能被 _ov() 包起来的参数（N_SMARTICLES、BASE_* 几何、RING_* 等）会在
+派生量算出来之前生效；其余参数在文件末尾统一套用。
+
+SMARTICLE_CONFIG 只接受**一个**文件 —— 本文件在 import 时执行一次，一个进程就是
+一次实验。要依次跑一串配置，交给驱动器：
+
+    python experiments.py --configs conditions/*.py
+
+两个省事的地方：
+
+* COMMAND_ARRAY 可以写成简写字符串，不必手写长度 N 的列表：
+      COMMAND_ARRAY = "a-462"             # 全场 -462
+      COMMAND_ARRAY = "a462; 0..8-851"    # 0~8 号不一样
+  语法见 gait.py。只想要两种指令按比例混合的话，用 CMD_A / CMD_B /
+  CMD_A_FRACTION 更直接。
+
+* **config_snapshot.json 可以直接当覆盖文件用**（“照着那次实验再跑一遍”）：
+  它带 _snapshot 标记，里面的派生量会被自动跳过并由输入参数重算。
+      SMARTICLE_CONFIG=datafile/xxx/config_snapshot.json python simulation.py
+  想要一份精简、好手改的版本：
+      python experiments.py --from-snapshot datafile/xxx/config_snapshot.json
+
+**N_SMARTICLES 只能靠换进程来扫**：smarticle.py / spawn.py / analysis.py 都是
+`from config import MAIN_LEN, ...` 这样按值绑定的，进程内改 N 不会重算它们。
+experiments.py 因此每个条件起一个新解释器。
 """
 
+import json
 import math
+import os
 import random
+
+# ── 覆盖文件 ─────────────────────────────────────────────────────────────────
+def _load_override_file(path):
+    """
+    读一个覆盖文件，返回 (settings, meta)。.json 走 json，其余按 Python 源码 exec。
+
+    settings 是要套用的参数；meta 是下划线开头的元信息 —— 其中 _snapshot 表示
+    这个文件是 save_config_snapshot() 写出来的快照，里面连派生量一起记着，
+    套用时要把派生量跳过（见文件末尾）。
+
+    utf-8-sig: Windows 上的记事本、PowerShell 的 Set-Content 都会写 BOM，
+    普通的 utf-8 读出来第一个字符是 U+FEFF，exec 直接语法错误。
+    没有 BOM 时 utf-8-sig 和 utf-8 完全等价。
+
+    experiments.py 也用这个函数来读用户给的一串 config 文件，
+    保证驱动器看到的覆盖项和 config.py 自己读到的完全一致。
+    """
+    if path.lower().endswith(".json"):
+        with open(path, encoding="utf-8-sig") as f:
+            raw = json.load(f)
+    else:
+        raw = {}
+        exec_ns = {}
+        with open(path, encoding="utf-8-sig") as f:
+            exec(compile(f.read(), path, "exec"), exec_ns)
+        raw = {k: v for k, v in exec_ns.items() if k != "__builtins__"}
+    # 下划线开头的是元信息(config_snapshot.json 的 _snapshot / _skipped，
+    # 覆盖文件里自己用的 _tmp 变量)，不是要套用的参数
+    settings = {k: v for k, v in raw.items() if not k.startswith("_")}
+    meta = {k: v for k, v in raw.items() if k.startswith("_")}
+    return settings, meta
+
+
+# SMARTICLE_CONFIG 只接受**一个**文件：config 在 import 时执行一次，一个进程
+# 就是一次实验。要依次跑一串 config，用 experiments.py --configs a.py b.py。
+_OVERRIDES = {}
+_OV_PATH = os.environ.get("SMARTICLE_CONFIG", "").strip()
+if _OV_PATH:
+    if os.pathsep in _OV_PATH or "," in _OV_PATH:
+        raise ValueError(
+            f"SMARTICLE_CONFIG 只能是一个文件，收到的是 {_OV_PATH!r}。"
+            f"要依次跑多个配置，用: "
+            f"python experiments.py --configs a.py b.py ...")
+    _OVERRIDES, _OV_META = _load_override_file(_OV_PATH)
+    _FROM_SNAPSHOT = "_snapshot" in _OV_META
+    print(f"[config] overrides from {_OV_PATH}"
+          f"{' (config_snapshot)' if _FROM_SNAPSHOT else ''}: "
+          f"{len(_OVERRIDES)} settings")
+else:
+    _OV_META, _FROM_SNAPSHOT = {}, False
+
+_OV_USED = set()
+
+
+def _ov(name, default):
+    """派生量之前就要定下来的参数走这里；没给覆盖值就用默认值。"""
+    if name in _OVERRIDES:
+        _OV_USED.add(name)
+        return _OVERRIDES[name]
+    return default
 
 # =============================================================================
 # Global Configuration  ← all tunable parameters are defined here
@@ -12,8 +106,8 @@ import random
 
 # ── Trial / seed ──────────────────────────────────────────────────────────────
 TRIAL_SEED_BASE   = 12345
-N_TRIALS_GLOBAL   = 10       # 0 means auto-read from initial-conditions file
-MAX_RUNTIME       = 100.0    # in seconds
+N_TRIALS_GLOBAL   = _ov("N_TRIALS_GLOBAL", 10)       # 0 means auto-read from initial-conditions file
+MAX_RUNTIME       = _ov("MAX_RUNTIME", 500.0)    # in seconds
 
 # ── Initial-condition selection (only used when ALREADY_SPWANED = True) ────
 # "sequential" : use init_conditions[0], [1], [2] ... in order (default)
@@ -52,13 +146,15 @@ WARMUP_STEPS        = 180
 RECORD_AFTER_WARMUP = True
 
 # ── Experiment size ───────────────────────────────────────────────────────────
-N_SMARTICLES      = 17         # number of smarticles in the simulation
+N_SMARTICLES      = _ov("N_SMARTICLES", 100)         # number of smarticles in the simulation
 
 # ── Reference geometry (used for auto-scaling) ────────────────────────────────
-BASE_N_REF        = 17         # population the reference arena was tuned for
-BASE_WALL_THICK   = 20
-BASE_MAIN_LEN, BASE_MAIN_W = 70, 41
-BASE_ARM_LEN,  BASE_ARM_W  = 70, 6
+BASE_N_REF        = _ov("BASE_N_REF", 17)         # population the reference arena was tuned for
+BASE_WALL_THICK   = _ov("BASE_WALL_THICK", 20)
+BASE_MAIN_LEN = _ov("BASE_MAIN_LEN", 70)
+BASE_MAIN_W   = _ov("BASE_MAIN_W", 41)
+BASE_ARM_LEN  = _ov("BASE_ARM_LEN", 70)
+BASE_ARM_W    = _ov("BASE_ARM_W", 6)
 
 # ── Population scaling ────────────────────────────────────────────────────────
 # Robot size is fixed, so putting N robots in the BASE_N_REF arena changes the
@@ -71,16 +167,16 @@ BASE_ARM_LEN,  BASE_ARM_W  = 70, 6
 #
 # Set to False to keep the fixed 900x760 / R=245 arena regardless of N (which
 # is only sensible for small N: 100 robots do not physically fit in R=245).
-AUTO_SCALE_ARENA  = True
+AUTO_SCALE_ARENA  = _ov("AUTO_SCALE_ARENA", True)
 _POP_SCALE        = (max(1.0, math.sqrt(N_SMARTICLES / BASE_N_REF))
                      if AUTO_SCALE_ARENA else 1.0)
 
 # ── Screen / geometry ─────────────────────────────────────────────────────────
-BASE_W, BASE_H    = 900, 760   # reference screen size (pixels) at BASE_N_REF
+BASE_W = _ov("BASE_W", 900); BASE_H = _ov("BASE_H", 760)    # reference screen size (pixels) at BASE_N_REF
 W, H              = int(round(BASE_W * _POP_SCALE)), int(round(BASE_H * _POP_SCALE))
-SCREEN_MARGIN     = 26         # margin between outer wall and window edge
+SCREEN_MARGIN     = _ov("SCREEN_MARGIN", 26)         # margin between outer wall and window edge
 
-BASE_INNER_R_UNSCALED = 245    # inner ring radius at BASE_N_REF, before scaling
+BASE_INNER_R_UNSCALED = _ov("BASE_INNER_R_UNSCALED", 245)    # inner ring radius at BASE_N_REF, before scaling
 INNER_R_UNSCALED  = BASE_INNER_R_UNSCALED * _POP_SCALE
 
 # ── Auto-scaling (do not edit unless you know what you are doing) ─────────────
@@ -111,15 +207,15 @@ WALL_ELASTICITY   = 0.0
 #   "mass_main", "mass_arm"   (absolute, already-scaled; optional)
 # If a mass is omitted it is auto-derived from the area ratio relative to the
 # homogeneous default, so a bigger arm is automatically heavier.
-ENABLE_HETEROGENEOUS_BODIES = False
+ENABLE_HETEROGENEOUS_BODIES = _ov("ENABLE_HETEROGENEOUS_BODIES", False)
 
 # Library of reusable body types ("species"). "default" = the global geometry.
-BODY_TYPES = {
+BODY_TYPES = _ov("BODY_TYPES", {
     "default":   {},                       # global BASE_* geometry, unchanged
     "long_arm":  {"arm_len_base": 110},    # longer arms (base 70 -> 110)
     "short_arm": {"arm_len_base": 45},     # shorter arms (base 70 -> 40)
     # "heavy":   {"main_w_base": 60, "mass_main": 400.0},
-}
+})
 
 # Per-robot assignment; length MUST equal N_SMARTICLES. Each entry is a key of
 # BODY_TYPES. Example for a 17-robot mixed population:
@@ -139,8 +235,8 @@ random.shuffle(BODY_ASSIGNMENT)
 #COMMAND_ARRAY = [862] * N_SMARTICLES   # default: same phase pi*5/4, A=pi/2, f=3Hz
 # Two-population mix, expressed as a fraction so it follows N_SMARTICLES.
 # At N_SMARTICLES = 17 this is exactly [862] * 9 + [462] * 8 as before.
-_CMD_A, _CMD_B    = 432, 832
-_CMD_A_FRACTION   = 0 / 17
+_CMD_A = _ov("CMD_A", 432); _CMD_B = _ov("CMD_B", 832)
+_CMD_A_FRACTION   = _ov("CMD_A_FRACTION", 0 / 17)
 _n_cmd_a          = int(round(N_SMARTICLES * _CMD_A_FRACTION))
 COMMAND_ARRAY = [_CMD_A] * _n_cmd_a + [_CMD_B] * (N_SMARTICLES - _n_cmd_a)
 random.shuffle(COMMAND_ARRAY)
@@ -249,8 +345,8 @@ COVERAGE_EVERY   = 5      # measure every N recorded frames (60 fps -> 12 Hz)
 #   polygon + fixed    : regular n-gon wall held in place at its corners.
 #   polygon + movable  : n rigid edge-links joined by free-rotating corner
 #                        hinge joints — a deformable loop the swarm can reshape.
-RING_MOVABLE   = True        # False = fixed (default); True = movable
-RING_SHAPE     = "polygon"     # "circle" (default) | "polygon"
+RING_MOVABLE   = _ov("RING_MOVABLE", True)        # False = fixed (default); True = movable
+RING_SHAPE     = _ov("RING_SHAPE", "polygon")     # "circle" (default) | "polygon"
 
 # --- Ring scaling with population -------------------------------------------
 # Both knobs are exactly 1.0 at N_SMARTICLES == BASE_N_REF, so the reference
@@ -260,8 +356,8 @@ RING_SHAPE     = "polygon"     # "circle" (default) | "polygon"
 # would be geometrically *coarser* relative to a robot at large N (edge length
 # 44 px at N=17 vs 106 px at N=100).  Scaling the count with the radius keeps
 # the edge length — and hence what a robot "sees" locally — constant.
-RING_N_SIDES_BASE     = 35
-AUTO_SCALE_RING_SIDES = True
+RING_N_SIDES_BASE     = _ov("RING_N_SIDES_BASE", 35)
+AUTO_SCALE_RING_SIDES = _ov("AUTO_SCALE_RING_SIDES", True)
 RING_N_SIDES   = (int(round(RING_N_SIDES_BASE * _POP_SCALE))
                   if AUTO_SCALE_RING_SIDES else RING_N_SIDES_BASE)
 
@@ -273,8 +369,8 @@ RING_N_SIDES   = (int(round(RING_N_SIDES_BASE * _POP_SCALE))
 #   *** This is a physics judgement call -- see notes.  Set to False to keep the
 #   *** old constant mass, or use _POP_SCALE (hoop of fixed linear density).
 # Ignored when RING_MOVABLE is False.  Heavier = harder for the swarm to shove.
-BASE_RING_MASS        = 1000.0
-AUTO_SCALE_RING_MASS  = True
+BASE_RING_MASS        = _ov("BASE_RING_MASS", 1000.0)
+AUTO_SCALE_RING_MASS  = _ov("AUTO_SCALE_RING_MASS", True)
 RING_MASS      = (BASE_RING_MASS * (SCALE ** 2)
                   * ((_POP_SCALE ** 2) if AUTO_SCALE_RING_MASS else 1.0))
 # Number of color bands painted around the ring, for observing rotation/translation.
@@ -360,7 +456,7 @@ W_MAX             = 35.0
 #              with AUTO_SCALE_ARENA the neighbour spacing is N-independent.
 #   "auto"   : "legacy" for N <= BASE_N_REF, "rings" above it.  Default, and
 #              bit-identical to the old behaviour at the reference population.
-SPAWN_LAYOUT      = "auto"
+SPAWN_LAYOUT      = _ov("SPAWN_LAYOUT", "auto")
 PEN_EPS           = 0.1 * SCALE
 SETTLE_STEPS      = 10
 SETTLE_DT         = 1 / 800.0
@@ -405,9 +501,88 @@ VIDEO_DOWNSCALE   = (max(1, int(round(_POP_SCALE)))
 # ── Misc ──────────────────────────────────────────────────────────────────────
 SCORE_VALID         = False
 SAVE_NPY            = False
-ALREADY_SPWANED     = True
+ALREADY_SPWANED     = _ov("ALREADY_SPWANED", True)
 rho                 = N_SMARTICLES / (W * H)  # number density
 
 # =============================================================================
 # End of global configuration
 # =============================================================================
+
+
+# =============================================================================
+# Run-level settings (以前写死在 simulation.main() 里)
+# =============================================================================
+# 放到这里是为了让一个覆盖文件能够完整决定一次运行 —— 批量对比实验里每个条件
+# 的初始条件文件、输出位置都不一样。
+INIT_FILE = "init_conditions/init_conditions_200_p.json"
+# 注意 IC 文件里的机器人数必须等于 N_SMARTICLES，run_trial 会当场检查。
+#   *_p_N17.json -> 17 台   *_p_N50.json -> 50 台   *_p.json -> 100 台
+EXP_NAME  = None      # None = 由 naming.generate_trial_name 自动生成
+OUT_ROOT  = "datafile"   # 输出根目录；每次实验落在 <OUT_ROOT>/<EXP_NAME>/
+PREVIEW    = False
+USE_PRESET = True
+
+
+# =============================================================================
+# 套用剩下的覆盖项
+# =============================================================================
+# _ov() 包过的参数在上面就已经生效了(派生量依赖它们，必须早)；这里处理其余的。
+# 派生量本身不该被覆盖 —— 覆盖它只会得到一份自相矛盾的配置(比如改了 MAIN_LEN
+# 但 L_s 还是按旧值算出来的)，所以直接报错而不是让它悄悄生效。
+_DERIVED = {
+    "W", "H", "SCALE", "INNER_R", "INNER_R_UNSCALED", "WALL_THICK",
+    "WALL_SEGMENTS", "MAIN_LEN", "MAIN_W", "ARM_LEN", "ARM_W",
+    "RING_N_SIDES", "RING_MASS", "L", "L_s", "S", "MASS_MAIN", "MASS_ARM",
+}
+
+_skipped_derived = []
+for _k, _v in _OVERRIDES.items():
+    if _k in _OV_USED:
+        continue                      # 已经在定义处生效
+    if _k in _DERIVED:
+        # config_snapshot.json 是完整记录，派生量当然也在里面。直接拿快照当
+        # 覆盖文件用是很自然的需求(“照着那次实验再跑一遍”)，所以对快照跳过
+        # 派生量而不是报错 —— 它们会由上面的输入参数重新算出同样的值。
+        # 手写的覆盖文件仍然报错：那多半是真写错了。
+        if _FROM_SNAPSHOT:
+            _skipped_derived.append(_k)
+            continue
+        raise ValueError(
+            f"覆盖文件里的 {_k!r} 是派生量，不能直接改 —— 它由 N_SMARTICLES / "
+            f"BASE_* 算出来。请改那些输入参数。"
+            f"（如果这是 config_snapshot.json，它缺少 _snapshot 标记，"
+            f"可能是旧版本写的：用 experiments.py --from-snapshot 转一下）")
+    if _k not in globals():
+        raise ValueError(
+            f"覆盖文件里的 {_k!r} 在 config.py 里不存在（拼错了？）")
+    globals()[_k] = _v
+if _skipped_derived:
+    print(f"[config] 快照里的 {len(_skipped_derived)} 个派生量已跳过"
+          f"（由输入参数重算）: {', '.join(sorted(_skipped_derived)[:6])}"
+          f"{' ...' if len(_skipped_derived) > 6 else ''}")
+
+
+# =============================================================================
+# COMMAND_ARRAY 允许写成简写字符串
+# =============================================================================
+# 手写一个长度 N 的列表太痛苦，尤其 N=100。允许写成 gait.py 那套调试简写：
+#     COMMAND_ARRAY = "a-462"            # 全场 -462
+#     COMMAND_ARRAY = "a462; 0..8-851"   # 大部分 462，0~8 号 -851
+# gait.py 只依赖 naming.py，不反过来 import config，所以这里可以安全地用它。
+if isinstance(COMMAND_ARRAY, str):
+    from gait import build_command_array
+    _spec = COMMAND_ARRAY
+    COMMAND_ARRAY = build_command_array(_spec, N_SMARTICLES)
+    print(f"[config] COMMAND_ARRAY = {_spec!r} -> {N_SMARTICLES} 条指令")
+elif len(COMMAND_ARRAY) != N_SMARTICLES:
+    # 不查的话会在 gait.GaitController 里以 IndexError 收场，看不出原因
+    raise ValueError(
+        f"COMMAND_ARRAY 有 {len(COMMAND_ARRAY)} 条，但 N_SMARTICLES="
+        f"{N_SMARTICLES}。要么写成简写字符串(如 \"a-462\")让它自动展开，"
+        f"要么改用 CMD_A / CMD_B / CMD_A_FRACTION。")
+
+# BODY_ASSIGNMENT 同理：长度必须匹配，否则 bodies.py 到一半才报
+if len(BODY_ASSIGNMENT) != N_SMARTICLES:
+    raise ValueError(
+        f"BODY_ASSIGNMENT 有 {len(BODY_ASSIGNMENT)} 项，但 N_SMARTICLES="
+        f"{N_SMARTICLES}。")

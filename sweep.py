@@ -59,7 +59,7 @@ from config import (
 )
 from spawn import load_initial_conditions
 from analysis import actuationimpactCalculation, write_results_csv
-from naming import generate_trial_name, _FREQ_DICT, _AMPLI_DICT, _INITIAL_DICT
+from naming import generate_param_name, _FREQ_DICT, _AMPLI_DICT, _INITIAL_DICT
 from simulation import run_trial, print_progress_bar
 
 # =============================================================================
@@ -372,7 +372,9 @@ def run_batch(batch: dict, ALL_INIT: list, init_cursor_start: int,
 
                 # Derive naming parameters from the command array
                 init_phases, omega, ampli = _naming_params_from_commands(cmd_array)
-                exp_name  = generate_trial_name(
+                # 扫描的每个格子要能从目录名认出自己的参数槽位，
+                # batch/*.py 的 parse_exp_name() 依赖 W1f/A1a 这些字段。
+                exp_name  = generate_param_name(
                     N_SMARTICLES, init_phases, omega=omega, amplitude=ampli,
                     prefix=f"batch_{name}",
                 )

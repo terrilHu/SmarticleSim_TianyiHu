@@ -236,6 +236,16 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     if ALREADY_SPWANED:
         _idx = init_idx if init_idx is not None else trial_id
         used_ic_idx = _idx
+        # 初始条件文件的机器人数必须和 N_SMARTICLES 一致：不一致的话
+        # COMMAND_ARRAY / BODY_ASSIGNMENT 长度对不上，往下会在
+        # `commands[i]` 处抛一个 IndexError，看不出真正的原因。
+        _n_ic = len(ALL_INIT[_idx].get("smarticles", ()))
+        if _n_ic and _n_ic != N_SMARTICLES:
+            raise ValueError(
+                f"初始条件 IC#{_idx} 有 {_n_ic} 台机器人，但 N_SMARTICLES="
+                f"{N_SMARTICLES}。请把 config.INIT_FILE 换成对应规模的文件"
+                f"(*_p_N17.json=17, *_p_N50.json=50, *_p.json=100)，"
+                f"或改 N_SMARTICLES。")
         #smarticles = build_from_initial_conditions(space, ALL_INIT[trial_id])
         smarticles = build_from_initial_conditions(space, ALL_INIT[_idx])
     else:
@@ -728,6 +738,15 @@ def save_config_snapshot(out_dir: str):
                           "why": str(e)}
     if skipped:
         snapshot["_skipped"] = skipped
+    # 标记这是一份完整快照（含派生量）。config.py 靠它决定"套用时跳过派生量"，
+    # 于是这个文件可以直接当覆盖文件用：照着这次实验再跑一遍。
+    snapshot["_snapshot"] = {
+        "version": 1,
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "note": ("直接用: SMARTICLE_CONFIG=<本文件> python simulation.py；"
+                 "精简成好手改的条件文件: "
+                 "python experiments.py --from-snapshot <本文件>"),
+    }
 
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "config_snapshot.json")
@@ -750,31 +769,28 @@ def save_config_snapshot(out_dir: str):
 # =============================================================================
 
 def main():
-    WORKERS   = PARALLEL_WORKERS           # >1 for parallel trials (config.py)
-    PREVIEW   = False
-    INIT_FILE = "init_conditions/init_conditions_200_p.json"
-    #INIT_FILE = os.path.join("init_conditions", EXP_NAME + ".json")
-    N_TRIALS  = N_TRIALS_GLOBAL            # 0 = auto-read from init file
-    USE_PRESET = True
+    # 这些以前写死在这里，现在从 config 读 —— 批量对比实验的每个条件都要换
+    # 初始条件文件和输出位置，写死就没法用覆盖文件驱动了。
+    WORKERS    = PARALLEL_WORKERS          # >1 for parallel trials (config.py)
+    PREVIEW    = getattr(cfg, "PREVIEW", False)
+    INIT_FILE  = cfg.INIT_FILE
+    N_TRIALS   = N_TRIALS_GLOBAL           # 0 = auto-read from init file
+    USE_PRESET = getattr(cfg, "USE_PRESET", True)
 
     # ── Generate unified experiment name using naming module ────────────────────
     _cmd0  = COMMAND_ARRAY[0];  _abs0 = abs(_cmd0)
     _z0    = _abs0 % 10;        _y0   = (_abs0 % 100 - _z0) // 10;  _x0 = _abs0 // 100
-    _PTAB, _ATAB, _FTAB = gait.PHASE_TABLE, gait.AMPLI_TABLE, gait.FREQ_TABLE
-    _ph0   = _PTAB[_x0 - 1] if 1 <= _x0 <= 8 else 0.0
+    _ATAB, _FTAB = gait.AMPLI_TABLE, gait.FREQ_TABLE
     _om0   = (_FTAB[_z0 - 1] if 1 <= _z0 <= 9 else 0.5) * 2 * math.pi
     _am0   = math.degrees(_ATAB[_y0 - 1] if 1 <= _y0 <= 6 else math.pi/4)
-    EXP_NAME    = generate_trial_name(
-        N_SMARTICLES,
-        [(_ph0, _ph0)] * N_SMARTICLES,
-        omega=(_om0, _om0),
-        amplitude=(_am0, _am0),
-    )
+    # 名字只带机器人数和时间戳；完整参数在 config_snapshot.json 里
+    EXP_NAME = getattr(cfg, "EXP_NAME", None) or generate_trial_name(N_SMARTICLES)
     print(f"[main] Experiment name: {EXP_NAME}")
 
-    OUT_DIR     = os.path.join("datafile",  EXP_NAME)
-    VIDEO_DIR   = os.path.join("videos",    EXP_NAME)
-    RESULTS_CSV = os.path.join("datafile",  EXP_NAME + "_summary.csv")
+    _root       = getattr(cfg, "OUT_ROOT", "datafile")
+    OUT_DIR     = os.path.join(_root,    EXP_NAME)
+    VIDEO_DIR   = os.path.join("videos", EXP_NAME)
+    RESULTS_CSV = os.path.join(_root,    EXP_NAME + "_summary.csv")
 
     actuations = actuationimpactCalculation(
         _om0 / (2 * math.pi), _om0 / (2 * math.pi),

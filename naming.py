@@ -16,6 +16,7 @@ Public exports (importable by sweep.py and other modules):
 """
 
 import math
+import time
 
 # =============================================================================
 # Lookup tables  (1-based: list index 0 corresponds to slot 1)
@@ -75,7 +76,40 @@ def _all_same(values: list) -> bool:
 # Public interface
 # =============================================================================
 
-def generate_trial_name(
+def timestamp(when=None) -> str:
+    """MMDD_HHMMSS —— 和实机侧 group0807_134945.csv 的时间戳格式一致。"""
+    return time.strftime("%m%d_%H%M%S", time.localtime(when))
+
+
+def generate_trial_name(n_robots: int, *_ignored, prefix: str = "trial",
+                        when=None, **_kwargs) -> str:
+    """
+    实验名 = 机器人总数 + 时间戳，例如 'trial_N17_0901_143022'。
+
+    参数不再进名字：现在参数组合太多(策略、角色、覆盖率……)，编进去既记不全
+    又不好读；完整参数每次运行都写在 <out_dir>/config_snapshot.json 里，
+    要查配置看那个。时间戳保证两次运行不会互相覆盖。
+
+    旧调用形式 generate_trial_name(n, init_phases, omega=..., amplitude=...)
+    仍然可用，多余的参数会被忽略 —— 需要把参数编进名字的场合(sweep.py 的
+    批量扫描，batch/ 下的脚本要从目录名把 W1f/A1a 解析回来)请改用
+    generate_param_name()。
+
+    Parameters
+    ----------
+    n_robots : 机器人总数
+    prefix   : 文件名前缀，默认 'trial'
+    when     : 时间戳用的 epoch 秒；None = 现在（测试里可以固定它）
+
+    Examples
+    --------
+    >>> generate_trial_name(17, when=0)          # doctest: +SKIP
+    'trial_N17_0101_080000'
+    """
+    return f"{prefix}_N{n_robots}_{timestamp(when)}"
+
+
+def generate_param_name(
     n_robots: int,
     init_phases: list,   # [(j1_phase, j2_phase), ...], length = n_robots, in radians
     omega: tuple,        # (omega1, omega2) in rad/s, applied globally
@@ -83,6 +117,12 @@ def generate_trial_name(
     prefix: str = "trial",
 ) -> str:
     """
+    把参数编进文件名（generate_trial_name 以前的行为）。
+
+    sweep.py 仍然用它：批量扫描的每个格子必须能从目录名认出自己的
+    频率/幅度槽位，batch/batch_grouping.py 和 batch/batch_group_size.py 的
+    parse_exp_name() 正是这么读的。
+
     Generate a filename string from robot count, initial phases, frequency, and amplitude.
 
     Parameters
