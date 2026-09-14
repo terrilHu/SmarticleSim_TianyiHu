@@ -314,7 +314,7 @@ STRATEGY_SPEC = {
         # {"selector": "convex_hull", "command": -52,
         #  "n_frames_join": 18, "n_frames_leave": 18},
         {"selector": "group_major_ends", "command": -52, "min_group_size": 3,
-         "n_per_end": 1, "override_group": False, "n_per_end": 6},
+         "n_per_end": 6, "override_group": False},
     ],
 
     "verbose": False,                    # log group/role join+leave events
