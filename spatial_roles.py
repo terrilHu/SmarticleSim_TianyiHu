@@ -1,26 +1,35 @@
 """
-spatial_roles.py  ─  按空间关系挑出一组"角色"机器人。
+spatial_roles.py  ─  Pick out a set of "role" robots by spatial relationship.
 
-例如"x 最小/最大、y 最小/最大的那台"(阵形的四个极值点)，
-或"主轴(PCA)长轴/短轴两端的机器人"(与坐标系无关，跟着阵形自身的朝向走)，
-主轴既可以用全场所有机器人拟合，也可以只用当前最大的那个分组来定方向，
-再把全场机器人投影到该方向上取两端。
-这些机器人固定执行一条单独的指令，优先级低于"处于大分组内"。
+For example "the ones with min/max x, min/max y" (the four extreme points of
+the formation), or "the robots at the ends of the principal axis (PCA)
+major/minor axis" (independent of the coordinate frame, follows the
+formation's own orientation) -- the principal axis can be fit from every
+robot in the field, or from only the current largest group to determine the
+direction, then all robots are projected onto that direction to pick the two
+ends.
+These robots are fixed to run a single separate command, at a priority lower
+than "belongs to a large group".
 
-与分组控制的关系是分层的，在 strategy.py 里合成最终指令再发：
+The relationship to group control is layered; strategy.py composes the final
+command from them:
 
-    第 1 层(最高)  已确认分组的成员  -> 该组的指令
-    第 2 层        空间角色          -> 角色指令
-    第 3 层(兜底)  其它              -> leave_command
+    Layer 1 (highest)  confirmed group members    -> that group's command
+    Layer 2            spatial role                -> role command
+    Layer 3 (fallback) everything else             -> leave_command
 
-所以一台机器人既是 x 最小又在大分组里时，执行的是分组指令 ── 角色不会盖掉它。
+So a robot that is both the x-minimum AND in a large group runs the group's
+command -- the role never overrides it.
 
-选择器全是"吃一帧 (ids, pos) 吐一组 marker id"的纯函数，
-所以加新规则只要写一个函数并登记到 SELECTORS，不用碰控制器。
+Selectors are all pure functions that "eat one frame's (ids, pos) and spit
+out a set of marker ids", so adding a new rule only requires writing a
+function and registering it in SELECTORS -- no need to touch the controller.
 
-本文件与实机侧同名文件保持一致的函数名与语义，这样同一套角色定义可以
-在仿真和实机上得到可比的结果；仿真里机器人不会丢失，miss_tolerance 相关
-的分支恒不触发，保留只是为了两边同构。
+This file keeps the same function names and semantics as its counterpart on
+the real-robot side, so the same role definitions give comparable results in
+simulation and on real robots; robots never go missing in simulation, so the
+branches related to miss_tolerance never actually trigger -- they're kept
+purely so the two sides stay structurally identical.
 """
 
 from typing import Callable, Dict, List, Set
@@ -30,25 +39,29 @@ import numpy as np
 
 def needs_group_record(fn):
     """
-    标记该选择器除了 (ids, pos) 还需要整帧的分组结果 rec。
-    用显式标记而不是靠签名推断: 自己写的选择器加不加这个装饰器一目了然，
-    没加的照旧只收 (ids, pos)，不会因为参数名手滑而被意外传入 rec。
+    Mark that this selector needs the whole frame's grouping result rec, in
+    addition to (ids, pos).
+    Uses an explicit marker rather than inferring it from the signature: it's
+    obvious at a glance whether a hand-written selector has this decorator or
+    not, and one without it still only ever receives (ids, pos) -- it won't
+    get rec passed in accidentally from a typo'd parameter name.
     """
     fn.needs_rec = True
     return fn
 
 
 # =============================================================================
-# 选择器：(ids, pos) -> set(marker id)
+# Selectors: (ids, pos) -> set(marker id)
 #   ids (k,)  marker id
-#   pos (k,2) 像素坐标，注意图像坐标系 y 轴向下
+#   pos (k,2) pixel coordinates; note the image coordinate system has y pointing down
 # =============================================================================
 
 def sel_extremes(ids, pos) -> Set[int]:
-    """x 最小/最大、y 最小/最大 ── 阵形的四个极值点。
+    """Min/max x, min/max y -- the four extreme points of the formation.
 
-    并列时 argmin/argmax 取第一个，所以同一台机器人可能同时占两个角色
-    (比如它既最靠左又最靠上)，此时返回集自然只有一个它，数量少于 4。
+    Ties take the first argmin/argmax, so the same robot may occupy two roles
+    at once (e.g. it's both leftmost and topmost), in which case the returned
+    set naturally contains just that one robot, fewer than 4.
     """
     if len(ids) == 0:
         return set()
@@ -57,21 +70,21 @@ def sel_extremes(ids, pos) -> Set[int]:
 
 
 def sel_x_extremes(ids, pos) -> Set[int]:
-    """只取 x 最小/最大"""
+    """Only take min/max x"""
     if len(ids) == 0:
         return set()
     return {int(ids[np.argmin(pos[:, 0])]), int(ids[np.argmax(pos[:, 0])])}
 
 
 def sel_y_extremes(ids, pos) -> Set[int]:
-    """只取 y 最小/最大"""
+    """Only take min/max y"""
     if len(ids) == 0:
         return set()
     return {int(ids[np.argmin(pos[:, 1])]), int(ids[np.argmax(pos[:, 1])])}
 
 
 def sel_convex_hull(ids, pos) -> Set[int]:
-    """整个阵形凸包上的机器人 ── 比四个极值点更完整的"边缘"定义"""
+    """Robots on the convex hull of the whole formation -- a more complete "edge" definition than the four extreme points"""
     if len(ids) < 3:
         return {int(i) for i in ids}
     try:
@@ -82,7 +95,7 @@ def sel_convex_hull(ids, pos) -> Set[int]:
 
 
 def sel_farthest_from_centroid(ids, pos, n=4) -> Set[int]:
-    """离质心最远的 n 台"""
+    """The n robots farthest from the centroid"""
     if len(ids) == 0:
         return set()
     d = np.linalg.norm(pos - pos.mean(axis=0), axis=1)
@@ -90,10 +103,12 @@ def sel_farthest_from_centroid(ids, pos, n=4) -> Set[int]:
 
 
 def _ends_by_projection(ids, pos, V, cols, n_per_end):
-    """把点投影到给定的轴上，取每条轴两端各 n 台。
+    """Project points onto the given axes, taking n robots from each end of each axis.
 
-    投影用的原点不影响结果：平移只是给所有投影加同一个常数，argsort 不变。
-    所以这里不必纠结该用组的质心还是全场质心。
+    The origin used for projection doesn't affect the result: a translation
+    just adds the same constant to every projection, and argsort is
+    unaffected. So there's no need to fuss over whether to use the group's
+    centroid or the whole field's centroid.
     """
     proj = np.asarray(pos, dtype=float) @ V
     out = set()
@@ -109,43 +124,56 @@ def _ends_by_projection(ids, pos, V, cols, n_per_end):
 
 def principal_axes(pos):
     """
-    对点云做主成分分析(PCA)，返回 (中心, 轴向标准差, 特征向量, 长短比)。
+    Run principal component analysis (PCA) on the point cloud, return (center,
+    axis standard deviations, eigenvectors, aspect ratio).
 
-        sigma    升序 [σ_短, σ_长]，即 sqrt(特征值)，单位与坐标相同(像素)
-        eigvecs  列向量, eigvecs[:,0]=短轴方向, eigvecs[:,1]=长轴方向, 两者正交
-        ratio    σ_长/σ_短, 即"长轴比短轴长多少倍"
+        sigma    ascending [σ_minor, σ_major], i.e. sqrt(eigenvalues), same units as the coordinates (pixels)
+        eigvecs  column vectors; eigvecs[:,0]=minor-axis direction, eigvecs[:,1]=major-axis direction, mutually orthogonal
+        ratio    σ_major/σ_minor, i.e. "how many times longer the major axis is than the minor axis"
 
-    这里返回标准差而不是特征值: 特征值是方差, 比值是长度比的**平方**,
-    拿它当阈值很容易看走眼(比值 1.5 其实只对应 1.22:1 的形状)。
-    开根号之后 ratio 就是直观的长宽比。
+    Standard deviation is returned here rather than the eigenvalue: the
+    eigenvalue is variance, and its ratio is the **square** of the length
+    ratio, which is easy to misread as a threshold (a ratio of 1.5 actually
+    corresponds to only a 1.22:1 shape). After taking the square root, ratio
+    is the intuitive aspect ratio.
 
-    用 eigh 而不是 eig: 协方差矩阵是对称的, eigh 保证实数解且特征值升序。
+    eigh is used instead of eig: the covariance matrix is symmetric, so eigh
+    guarantees real solutions with eigenvalues in ascending order.
     """
     pos = np.asarray(pos, dtype=float).reshape(-1, 2)
     ctr = pos.mean(axis=0)
     cov = np.cov((pos - ctr).T)
     w, V = np.linalg.eigh(cov)
-    sigma = np.sqrt(np.maximum(w, 0.0))          # 数值误差可能给出极小的负值
+    sigma = np.sqrt(np.maximum(w, 0.0))          # numerical error can produce tiny negative values
     ratio = float(sigma[1] / sigma[0]) if sigma[0] > 1e-9 else float("inf")
     return ctr, sigma, V, ratio
 
 
 def sel_principal_ends(ids, pos, axis="both", n_per_end=1, min_anisotropy=1.5):
     """
-    用全部机器人的位置拟合主轴(PCA)，取长轴和/或短轴两端的机器人。
+    Fit the principal axes (PCA) from every robot's position, and take the
+    robots at the ends of the major and/or minor axis.
 
-        axis           "major" 只取长轴两端 / "minor" 只取短轴两端 / "both" 两条轴都取
-        n_per_end      每端取几台(按投影最靠外的 n 台)
-        min_anisotropy 长短比(σ长/σ短)低于此值时判定"阵形太圆、主轴方向没意义"，
-                       返回空集。这一条很重要: 接近圆形时特征向量方向由噪声决定,
-                       实测长宽比 1.1 时长轴方向每帧乱跳 40 度以上,
-                       不设门槛的话选出来的就是随机两台。默认 1.5 对应 1.5:1 的形状。
+        axis           "major" only takes the major-axis ends / "minor" only takes the minor-axis ends / "both" takes both axes
+        n_per_end      how many robots to take from each end (the n farthest out by projection)
+        min_anisotropy below this aspect ratio (σ_major/σ_minor) the formation is
+                       judged "too round, principal-axis direction meaningless"
+                       and an empty set is returned. This matters: near a
+                       circle the eigenvector direction is driven by noise --
+                       measured, at an aspect ratio of 1.1 the major-axis
+                       direction swings by more than 40 degrees frame to
+                       frame -- so without a threshold the selection would
+                       just be two random robots. Default 1.5 corresponds to
+                       a 1.5:1 shape.
 
-    注意主轴方向有正负号歧义(V 和 -V 都是特征向量), 但这里两端一起取,
-    所以选出的集合与符号无关, 不会因为符号翻转而在两端之间跳。
+    Note the principal-axis direction has a sign ambiguity (both V and -V are
+    valid eigenvectors), but since both ends are taken together here, the
+    selected set is independent of sign and won't flip between ends due to a
+    sign flip.
 
-    返回空集表示"本帧无法定义该角色"; SpatialRoleTracker 会把它当作
-    "本帧无信息"而保持现任角色不变, 不会把大家撤任。
+    Returning an empty set means "this role cannot be defined this frame";
+    SpatialRoleTracker treats that as "no information this frame" and keeps
+    the current role membership unchanged rather than dismissing everyone.
     """
     ids = np.asarray(ids)
     pos = np.asarray(pos, dtype=float).reshape(-1, 2)
@@ -153,13 +181,14 @@ def sel_principal_ends(ids, pos, axis="both", n_per_end=1, min_anisotropy=1.5):
         return {int(i) for i in ids}
 
     _ctr, sigma, V, ratio = principal_axes(pos)
-    if sigma[1] < 1e-9:            # 所有点重合, 连长轴都没有
+    if sigma[1] < 1e-9:            # all points coincide, there isn't even a major axis
         return set()
-    if ratio < min_anisotropy:     # 太圆, 轴向由噪声决定
+    if ratio < min_anisotropy:     # too round, axis direction is driven by noise
         return set()
 
     cols = {"minor": [0], "major": [1], "both": [0, 1]}[axis]
-    # 短轴长度相对长轴可忽略(阵形几乎共线)时, 短轴两端同样是噪声, 跳过该轴
+    # when the minor-axis length is negligible relative to the major axis (the formation is nearly collinear),
+    # the minor-axis ends are likewise noise, so skip that axis
     if sigma[0] < 1e-6 * sigma[1]:
         cols = [c for c in cols if c != 0]
         if not cols:
@@ -169,12 +198,12 @@ def sel_principal_ends(ids, pos, axis="both", n_per_end=1, min_anisotropy=1.5):
 
 
 def sel_major_ends(ids, pos, **kw):
-    """长轴两端 ── 阵形最伸展方向上最靠前和最靠后的机器人"""
+    """Major-axis ends -- the leading and trailing robots along the formation's most-extended direction"""
     return sel_principal_ends(ids, pos, axis="major", **kw)
 
 
 def sel_minor_ends(ids, pos, **kw):
-    """短轴两端 ── 阵形最窄方向上的两侧边缘"""
+    """Minor-axis ends -- the two side edges along the formation's narrowest direction"""
     return sel_principal_ends(ids, pos, axis="minor", **kw)
 
 
@@ -184,33 +213,43 @@ def sel_largest_group_axis_ends(ids, pos, rec=None, axis="both", n_per_end=1,
                                 max_group_size=None, min_lead=0,
                                 select_from="all"):
     """
-    用**当前最大的分组**拟合主轴，只取它的**方向**，
-    再把机器人投影到这两个方向上，选出两端的个体。
+    Fit the principal axes from **only the current largest group**, take just
+    its **direction**, then project all robots onto those two directions and
+    pick the individuals at the ends.
 
-    拆成两步是有意的：
-      - 方向由那个团决定 ── 团外个体和小团不会把轴带偏，量的是团自己的朝向；
-      - 端点默认在**全场所有机器人**里挑(select_from="all") ── 选出来的可能
-        是团外那些沿该方向更靠外的机器人，这正是"沿团的朝向最前/最后"的含义。
-        想只在团内部选就把 select_from 设成 "group"。
+    Splitting this into two steps is intentional:
+      - direction is decided by that group ── robots outside it and small
+        groups don't skew the axis; what's measured is the group's own
+        orientation;
+      - the endpoints default to being picked from **every robot in the
+        field** (select_from="all") ── the ones selected may be robots
+        outside the group that are farther out along that direction, which is
+        exactly what "leading/trailing along the group's orientation" means.
+        Set select_from to "group" to pick only from within the group.
 
         axis            "major" / "minor" / "both"
-        n_per_end       每端取几台
-        min_anisotropy  该组长短比低于此值 -> 方向由噪声决定, 返回空集
-        min_group_size  最大组规模低于此门槛 -> 返回空集(还没形成值得追踪的团)
-        max_group_size  最大组规模高于此上限 -> 返回空集。None = 不设上限。
-                        通常用角色层的 group_size_range 来控制更方便，
-                        这里保留是为了让选择器单独使用时也能锁定范围
-        min_lead        最大组要比第二大的组多出至少这么多台才作数。两组规模接近时
-                        "哪个最大"会逐帧易主，轴向会整个跳到另一群机器人身上；
-                        设 1~2 可把这种情况判为不确定。默认 0 = 不要求。
-        select_from     "all" 在全场机器人里选端点(默认) / "group" 只在该组内选
+        n_per_end       how many robots to take from each end
+        min_anisotropy  below this aspect ratio for the group, direction is driven by noise -> returns an empty set
+        min_group_size  below this threshold for the largest group's size -> returns an empty set (no group worth tracking has formed yet)
+        max_group_size  above this cap for the largest group's size -> returns an empty set. None = no cap.
+                        Usually easier to control via the role layer's
+                        group_size_range; kept here so the selector can also
+                        lock the range when used standalone
+        min_lead        the largest group must exceed the second-largest by at
+                        least this many robots to count. When two groups are
+                        close in size, "which one is largest" flips frame to
+                        frame and the axis jumps wholesale to a different
+                        cluster of robots; set 1~2 to treat this case as
+                        undetermined. Default 0 = no requirement.
+        select_from     "all" picks endpoints across the whole field (default) / "group" picks only within that group
 
-    返回空集表示"本帧无法定义该角色"，SpatialRoleTracker 会保持现任角色不变。
+    Returning an empty set means "this role cannot be defined this frame";
+    SpatialRoleTracker keeps the current role membership unchanged.
     """
     if rec is None or not len(rec.get("sizes", ())):
         return set()
     sizes = np.asarray(rec["sizes"])
-    order = np.argsort(-sizes, kind="mergesort")   # 稳定排序: 同规模时保持原有顺序
+    order = np.argsort(-sizes, kind="mergesort")   # stable sort: preserves the original order when sizes are equal
     gi = int(order[0])
     if int(sizes[gi]) < min_group_size:
         return set()
@@ -223,19 +262,19 @@ def sel_largest_group_axis_ends(ids, pos, rec=None, axis="both", n_per_end=1,
     all_pos = np.asarray(rec["pos"], dtype=float).reshape(-1, 2)
     sel = np.asarray(rec["labels"]) == gi
     if sel.sum() < 3:
-        return set()                      # 点太少，拟合不出方向
+        return set()                      # too few points to fit a direction
 
-    # 第 1 步：只用该组的成员定方向
+    # Step 1: use only this group's members to determine direction
     _ctr, sigma, V, ratio = principal_axes(all_pos[sel])
     if sigma[1] < 1e-9 or ratio < min_anisotropy:
         return set()
     cols = {"minor": [0], "major": [1], "both": [0, 1]}[axis]
-    if sigma[0] < 1e-6 * sigma[1]:        # 该组几乎共线，短轴方向没意义
+    if sigma[0] < 1e-6 * sigma[1]:        # this group is nearly collinear, minor-axis direction is meaningless
         cols = [c for c in cols if c != 0]
         if not cols:
             return set()
 
-    # 第 2 步：把机器人投影到这两个方向上取两端
+    # Step 2: project robots onto these two directions and take the ends
     if select_from == "group":
         return _ends_by_projection(all_ids[sel], all_pos[sel], V, cols, n_per_end)
     return _ends_by_projection(all_ids, all_pos, V, cols, n_per_end)
@@ -243,13 +282,13 @@ def sel_largest_group_axis_ends(ids, pos, rec=None, axis="both", n_per_end=1,
 
 @needs_group_record
 def sel_largest_group_major_ends(ids, pos, rec=None, **kw):
-    """按最大分组的长轴方向，取两端的机器人"""
+    """Take the robots at the ends along the largest group's major-axis direction"""
     return sel_largest_group_axis_ends(ids, pos, rec, axis="major", **kw)
 
 
 @needs_group_record
 def sel_largest_group_minor_ends(ids, pos, rec=None, **kw):
-    """按最大分组的短轴方向，取两端的机器人"""
+    """Take the robots at the ends along the largest group's minor-axis direction"""
     return sel_largest_group_axis_ends(ids, pos, rec, axis="minor", **kw)
 
 
@@ -259,10 +298,10 @@ SELECTORS: Dict[str, Callable] = {
     "y_extremes": sel_y_extremes,
     "convex_hull": sel_convex_hull,
     "farthest": sel_farthest_from_centroid,
-    "principal_ends": sel_principal_ends,     # 长轴+短轴共四端
-    "major_ends": sel_major_ends,             # 只要长轴两端
-    "minor_ends": sel_minor_ends,             # 只要短轴两端
-    # 下面三个只用"当前最大的分组"拟合主轴，不受团外个体和小团影响
+    "principal_ends": sel_principal_ends,     # major + minor axis, four ends total
+    "major_ends": sel_major_ends,             # major-axis ends only
+    "minor_ends": sel_minor_ends,             # minor-axis ends only
+    # the three below fit the principal axes using only "the current largest group", unaffected by individuals outside it or small groups
     "group_axis_ends": sel_largest_group_axis_ends,
     "group_major_ends": sel_largest_group_major_ends,
     "group_minor_ends": sel_largest_group_minor_ends,
@@ -270,39 +309,46 @@ SELECTORS: Dict[str, Callable] = {
 
 
 # =============================================================================
-# 带迟滞的角色追踪
+# Role tracking with hysteresis
 # =============================================================================
 
 class SpatialRoleTracker:
     """
-    维护"当前担任空间角色"的机器人数组。
+    Maintains the array of robots "currently holding a spatial role".
 
-    极值点每帧都可能因为一两个像素的抖动而易主 ── 两台机器人 x 坐标只差 3px 时，
-    谁是最小值纯粹是噪声。所以和分组一样用连续帧数做迟滞：
+    An extreme point can change hands every frame from just a pixel or two of
+    jitter ── when two robots' x coordinates differ by only 3px, which one is
+    the minimum is pure noise. So, as with grouping, hysteresis is applied via
+    a run of consecutive frames:
 
-        连续 n_frames_join  帧被选中 -> 加入数组
-        连续 n_frames_leave 帧未被选中 -> 移出数组
+        selected for n_frames_join  consecutive frames -> joins the array
+        not selected for n_frames_leave consecutive frames -> leaves the array
 
-    代价是成员数不再恒等于选择器返回的个数，两个方向都可能偏：
-      - 多了：交接期间旧的还没退、新的已经进；
-      - 少了：两台严格交替领先时谁都攒不满连续帧，于是谁都不担任该角色
-        (这种情况下"谁是最左"本来就无法判定，空着比每帧换人好)。
-    需要角色数严格固定就把 n_frames_join 设为 1，代价是又变回每帧易主。
+    The cost is that membership count is no longer always equal to what the
+    selector returns, and can drift either way:
+      - too many: during a handover the old one hasn't left yet while the new
+        one has already joined;
+      - too few: when two robots strictly alternate leading, neither
+        accumulates enough consecutive frames, so neither holds the role
+        (in this case "who is leftmost" is genuinely undecidable anyway --
+        leaving it empty is better than swapping every frame).
+    To force a strictly fixed role count, set n_frames_join to 1, at the cost
+    of going back to changing hands every frame.
     """
 
     def __init__(self, selector="extremes", n_frames_join=6, n_frames_leave=6,
                  miss_tolerance=2, verbose=True, label=None, **kwargs):
         """
-        label   角色层的名字，多层并存时用来区分日志和事件记录
-        kwargs  原样转交给选择器，例如 PCA 系列的 axis / n_per_end / min_anisotropy
+        label   the role layer's name, used to distinguish logs and event records when multiple layers coexist
+        kwargs  passed straight through to the selector, e.g. axis / n_per_end / min_anisotropy for the PCA family
         """
         if callable(selector):
             self.selector = selector
             self.name = getattr(selector, "__name__", "custom")
         else:
             if selector not in SELECTORS:
-                raise ValueError(f"未知的空间角色选择器: {selector!r}; "
-                                 f"可选: {sorted(SELECTORS)}")
+                raise ValueError(f"unknown spatial-role selector: {selector!r}; "
+                                 f"choices: {sorted(SELECTORS)}")
             self.selector = SELECTORS[selector]
             self.name = selector
         self.label = label or self.name
@@ -321,12 +367,16 @@ class SpatialRoleTracker:
 
     def update(self, ts, ids, pos, rec=None, enabled=True) -> Set[int]:
         """
-        吃一帧的 (ids, pos)，返回当前的角色成员集合。
-        rec 是整帧的分组结果，只转交给标了 @needs_group_record 的选择器。
+        Eats one frame's (ids, pos), returns the current set of role members.
+        rec is the whole frame's grouping result, passed through only to
+        selectors marked with @needs_group_record.
 
-        enabled=False 表示"本帧该层不适用"(比如最大组规模跑出了配置的范围)。
-        此时按"明确没被选中"处理，让现任成员走正常的 n_frames_leave 迟滞退出，
-        而不是立刻全体撤任 ── 规模在范围边界上抖动时才不会来回刷指令。
+        enabled=False means "this layer doesn't apply this frame" (e.g. the
+        largest group's size fell outside the configured range). In that
+        case it's treated as "explicitly not selected", so current members
+        exit through the normal n_frames_leave hysteresis rather than being
+        dismissed all at once ── this keeps commands from flapping when the
+        size jitters right at the range boundary.
         """
         self.frames += 1
         ids = np.asarray(ids)
@@ -341,14 +391,18 @@ class SpatialRoleTracker:
             chosen = set()
         seen = {int(x) for x in ids}
 
-        # 选择器返回空集有两种含义：本帧没数据，或者判定"此刻无法定义该角色"
-        # (PCA 选择器在阵形接近圆形时就会这样)。两种情况都不该立刻把现任角色
-        # 全部撤任 ── 那会造成指令抖动。这里当作"本帧无信息"，计数原地保持。
-        # 但 enabled=False 是明确的"不适用"，要走退出流程，所以排除在外。
+        # An empty set from the selector has two possible meanings: no data
+        # this frame, or a determination that "this role can't be defined
+        # right now" (the PCA selectors do this when the formation is nearly
+        # circular). Neither case should immediately dismiss all current
+        # members ── that would cause commands to flap. Treated here as "no
+        # information this frame", counters are left as-is. But enabled=False
+        # is an explicit "not applicable" and must go through the exit flow,
+        # so it's excluded from this.
         if enabled and not chosen and len(ids):
             return set(self.members)
 
-        # 本帧没看到的，容忍若干帧再按"未被选中"计，避免漏检直接把角色踢掉
+        # Robots not seen this frame are tolerated for a few frames before counting as "not selected", to avoid a missed detection immediately kicking the role out
         tracked = self.members | set(self.streak_in) | set(self.streak_out)
         for mid in tracked - seen:
             self.miss[mid] = self.miss.get(mid, 0) + 1
@@ -370,16 +424,16 @@ class SpatialRoleTracker:
                 self.members.add(mid)
                 self._log(ts, "role_join", mid)
                 if self.verbose:
-                    print(f"[role] {mid} 加入角色层 {self.label}, "
-                          f"当前 {sorted(self.members)}")
+                    print(f"[role] {mid} joined role layer {self.label}, "
+                          f"current members {sorted(self.members)}")
             elif mid in self.members and self.streak_out.get(mid, 0) >= self.n_leave:
                 self.members.discard(mid)
                 self._log(ts, "role_leave", mid)
                 if self.verbose:
-                    print(f"[role] {mid} 退出角色层 {self.label}, "
-                          f"当前 {sorted(self.members)}")
+                    print(f"[role] {mid} left role layer {self.label}, "
+                          f"current members {sorted(self.members)}")
 
-        # 长期看不见的直接移出，它可能已经出局面了
+        # a robot unseen for a long time is removed outright -- it may have exited the field of view
         for mid in list(self.members):
             if self.miss.get(mid, 0) > max(self.n_leave, self.miss_tolerance):
                 self.members.discard(mid)

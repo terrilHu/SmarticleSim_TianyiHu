@@ -2,37 +2,45 @@
 config.py  ─  All global parameters for the Smarticle simulation.
 Edit this file to change experiment settings.
 
-批量对比实验：把要改的参数写进一个覆盖文件，用环境变量 SMARTICLE_CONFIG 指过来，
-本文件在计算派生量**之前**就会读它。experiments.py 就是这么驱动一组条件的。
+Batch comparison experiments: write the parameters to change into an override
+file and point to it via the SMARTICLE_CONFIG environment variable; this file
+reads it **before** computing derived quantities. experiments.py drives a set
+of conditions exactly this way.
 
     SMARTICLE_CONFIG=conditions/n50_edge.py  python simulation.py
 
-覆盖文件可以是 .py（一串 `NAME = value`，语法和本文件一样，元组/None 都能写）
-或 .json。能被 _ov() 包起来的参数（N_SMARTICLES、BASE_* 几何、RING_* 等）会在
-派生量算出来之前生效；其余参数在文件末尾统一套用。
+The override file can be a .py (a series of `NAME = value` lines, same syntax
+as this file — tuples/None are all fine) or a .json. Parameters wrapped by
+_ov() (N_SMARTICLES, BASE_* geometry, RING_*, etc.) take effect before derived
+quantities are computed; the rest are applied uniformly at the end of the file.
 
-SMARTICLE_CONFIG 只接受**一个**文件 —— 本文件在 import 时执行一次，一个进程就是
-一次实验。要依次跑一串配置，交给驱动器：
+SMARTICLE_CONFIG accepts only **one** file — this file executes once on
+import, so one process is one experiment. To run a series of configs in
+sequence, hand it to the driver:
 
     python experiments.py --configs conditions/*.py
 
-两个省事的地方：
+Two conveniences:
 
-* COMMAND_ARRAY 可以写成简写字符串，不必手写长度 N 的列表：
-      COMMAND_ARRAY = "a-462"             # 全场 -462
-      COMMAND_ARRAY = "a462; 0..8-851"    # 0~8 号不一样
-  语法见 gait.py。只想要两种指令按比例混合的话，用 CMD_A / CMD_B /
-  CMD_A_FRACTION 更直接。
+* COMMAND_ARRAY can be written as a shorthand string instead of a hand-written
+  list of length N:
+      COMMAND_ARRAY = "a-462"             # everyone -462
+      COMMAND_ARRAY = "a462; 0..8-851"    # ids 0~8 differ
+  See gait.py for the syntax. For a simple ratio mix of two commands, use
+  CMD_A / CMD_B / CMD_A_FRACTION instead.
 
-* **config_snapshot.json 可以直接当覆盖文件用**（“照着那次实验再跑一遍”）：
-  它带 _snapshot 标记，里面的派生量会被自动跳过并由输入参数重算。
+* **config_snapshot.json can be used directly as an override file** ("re-run
+  that same experiment"): it carries the _snapshot marker, so its derived
+  quantities are automatically skipped and recomputed from the input
+  parameters.
       SMARTICLE_CONFIG=datafile/xxx/config_snapshot.json python simulation.py
-  想要一份精简、好手改的版本：
+  For a trimmed, easy-to-hand-edit version:
       python experiments.py --from-snapshot datafile/xxx/config_snapshot.json
 
-**N_SMARTICLES 只能靠换进程来扫**：smarticle.py / spawn.py / analysis.py 都是
-`from config import MAIN_LEN, ...` 这样按值绑定的，进程内改 N 不会重算它们。
-experiments.py 因此每个条件起一个新解释器。
+**N_SMARTICLES can only be swept by switching processes**: smarticle.py /
+spawn.py / analysis.py all do `from config import MAIN_LEN, ...`, which binds
+by value, so changing N within a process does not recompute them.
+experiments.py therefore spawns a new interpreter per condition.
 """
 
 import json
@@ -40,21 +48,25 @@ import math
 import os
 import random
 
-# ── 覆盖文件 ─────────────────────────────────────────────────────────────────
+# ── Override file ─────────────────────────────────────────────────────────
 def _load_override_file(path):
     """
-    读一个覆盖文件，返回 (settings, meta)。.json 走 json，其余按 Python 源码 exec。
+    Read one override file, return (settings, meta). .json goes through json;
+    everything else is exec'd as Python source.
 
-    settings 是要套用的参数；meta 是下划线开头的元信息 —— 其中 _snapshot 表示
-    这个文件是 save_config_snapshot() 写出来的快照，里面连派生量一起记着，
-    套用时要把派生量跳过（见文件末尾）。
+    settings are the parameters to apply; meta is metadata whose keys start
+    with an underscore — in particular _snapshot means this file was written
+    by save_config_snapshot(), which also records the derived quantities, so
+    those must be skipped when applying it (see the end of this file).
 
-    utf-8-sig: Windows 上的记事本、PowerShell 的 Set-Content 都会写 BOM，
-    普通的 utf-8 读出来第一个字符是 U+FEFF，exec 直接语法错误。
-    没有 BOM 时 utf-8-sig 和 utf-8 完全等价。
+    utf-8-sig: Notepad and PowerShell's Set-Content on Windows both write a
+    BOM; reading it as plain utf-8 makes the first character U+FEFF, which
+    exec chokes on as a syntax error. utf-8-sig is fully equivalent to utf-8
+    when there is no BOM.
 
-    experiments.py 也用这个函数来读用户给的一串 config 文件，
-    保证驱动器看到的覆盖项和 config.py 自己读到的完全一致。
+    experiments.py also uses this function to read the series of config files
+    the user supplies, so the overrides the driver sees are guaranteed to
+    match what config.py itself reads.
     """
     if path.lower().endswith(".json"):
         with open(path, encoding="utf-8-sig") as f:
@@ -65,22 +77,24 @@ def _load_override_file(path):
         with open(path, encoding="utf-8-sig") as f:
             exec(compile(f.read(), path, "exec"), exec_ns)
         raw = {k: v for k, v in exec_ns.items() if k != "__builtins__"}
-    # 下划线开头的是元信息(config_snapshot.json 的 _snapshot / _skipped，
-    # 覆盖文件里自己用的 _tmp 变量)，不是要套用的参数
+    # Underscore-prefixed keys are metadata (config_snapshot.json's _snapshot /
+    # _skipped, or a scratch _tmp variable used inside the override file
+    # itself), not parameters to apply
     settings = {k: v for k, v in raw.items() if not k.startswith("_")}
     meta = {k: v for k, v in raw.items() if k.startswith("_")}
     return settings, meta
 
 
-# SMARTICLE_CONFIG 只接受**一个**文件：config 在 import 时执行一次，一个进程
-# 就是一次实验。要依次跑一串 config，用 experiments.py --configs a.py b.py。
+# SMARTICLE_CONFIG accepts only **one** file: config executes once on import,
+# so one process is one experiment. To run a series of configs in sequence,
+# use experiments.py --configs a.py b.py.
 _OVERRIDES = {}
 _OV_PATH = os.environ.get("SMARTICLE_CONFIG", "").strip()
 if _OV_PATH:
     if os.pathsep in _OV_PATH or "," in _OV_PATH:
         raise ValueError(
-            f"SMARTICLE_CONFIG 只能是一个文件，收到的是 {_OV_PATH!r}。"
-            f"要依次跑多个配置，用: "
+            f"SMARTICLE_CONFIG can only be a single file, got {_OV_PATH!r}. "
+            f"To run multiple configs in sequence, use: "
             f"python experiments.py --configs a.py b.py ...")
     _OVERRIDES, _OV_META = _load_override_file(_OV_PATH)
     _FROM_SNAPSHOT = "_snapshot" in _OV_META
@@ -94,7 +108,8 @@ _OV_USED = set()
 
 
 def _ov(name, default):
-    """派生量之前就要定下来的参数走这里；没给覆盖值就用默认值。"""
+    """Parameters that must be settled before derived quantities go through
+    here; falls back to the default when no override value is given."""
     if name in _OVERRIDES:
         _OV_USED.add(name)
         return _OVERRIDES[name]
@@ -301,15 +316,16 @@ STRATEGY_SPEC = {
     # ones.  Names: spatial_roles.SELECTORS.  Any extra key is passed straight
     # to the selector -- the useful ones for the PCA family
     # (principal/major/minor_ends, group_*_ends) are:
-    #     "n_per_end":      每端取几台机器人 (默认 1)
+    #     "n_per_end":      how many robots to take from each end (default 1)
     #     "axis":           "major" / "minor" / "both"
-    #     "min_anisotropy": 长短比低于此值就判定方向没意义，该帧不选人 (默认 1.5)
-    #     "min_group_size": 最大组小于此值就不选人 (group_*_ends)
-    #     "select_from":    "all" 在全场选端点(默认) / "group" 只在该组内选
-    # "farthest" 用的是 "n"；extremes / convex_hull 之类没有额外参数。
+    #     "min_anisotropy": below this aspect ratio, direction is judged meaningless and no one is selected that frame (default 1.5)
+    #     "min_group_size": below this size the largest group selects no one (group_*_ends)
+    #     "select_from":    "all" selects endpoints across the whole field (default) / "group" selects only within that group
+    # "farthest" uses "n"; extremes / convex_hull and the like take no extra parameters.
     #
-    # "override_group": True 把这条角色提到分组层**之上** —— 默认 False，即
-    # 机器人一旦被某条 group_rule 认领就执行分组指令，角色管不着它。
+    # "override_group": True promotes this role **above** the grouping layer --
+    # default False, meaning once a robot is claimed by a group_rule it runs
+    # the group's command and the role layer has no say over it.
     "roles": [
         # {"selector": "convex_hull", "command": -52,
         #  "n_frames_join": 18, "n_frames_leave": 18},
@@ -510,25 +526,29 @@ rho                 = N_SMARTICLES / (W * H)  # number density
 
 
 # =============================================================================
-# Run-level settings (以前写死在 simulation.main() 里)
+# Run-level settings (previously hard-coded in simulation.main())
 # =============================================================================
-# 放到这里是为了让一个覆盖文件能够完整决定一次运行 —— 批量对比实验里每个条件
-# 的初始条件文件、输出位置都不一样。
+# Placed here so a single override file can fully determine one run -- in a
+# batch comparison experiment, each condition has its own initial-conditions
+# file and output location.
 INIT_FILE = "init_conditions/init_conditions_200_p.json"
-# 注意 IC 文件里的机器人数必须等于 N_SMARTICLES，run_trial 会当场检查。
-#   *_p_N17.json -> 17 台   *_p_N50.json -> 50 台   *_p.json -> 100 台
-EXP_NAME  = None      # None = 由 naming.generate_trial_name 自动生成
-OUT_ROOT  = "datafile"   # 输出根目录；每次实验落在 <OUT_ROOT>/<EXP_NAME>/
+# Note: the robot count in the IC file must equal N_SMARTICLES; run_trial checks this on the spot.
+#   *_p_N17.json -> 17 robots   *_p_N50.json -> 50 robots   *_p.json -> 100 robots
+EXP_NAME  = None      # None = auto-generated by naming.generate_trial_name
+OUT_ROOT  = "datafile"   # output root directory; each experiment lands under <OUT_ROOT>/<EXP_NAME>/
 PREVIEW    = False
 USE_PRESET = True
 
 
 # =============================================================================
-# 套用剩下的覆盖项
+# Apply the remaining overrides
 # =============================================================================
-# _ov() 包过的参数在上面就已经生效了(派生量依赖它们，必须早)；这里处理其余的。
-# 派生量本身不该被覆盖 —— 覆盖它只会得到一份自相矛盾的配置(比如改了 MAIN_LEN
-# 但 L_s 还是按旧值算出来的)，所以直接报错而不是让它悄悄生效。
+# Parameters wrapped by _ov() already took effect above (derived quantities
+# depend on them, so it has to happen early); this handles the rest.
+# Derived quantities themselves should never be overridden -- doing so would
+# only produce a self-contradictory config (e.g. changing MAIN_LEN while L_s
+# is still computed from the old value), so this raises rather than letting
+# it silently apply.
 _DERIVED = {
     "W", "H", "SCALE", "INNER_R", "INNER_R_UNSCALED", "WALL_THICK",
     "WALL_SEGMENTS", "MAIN_LEN", "MAIN_W", "ARM_LEN", "ARM_W",
@@ -538,51 +558,55 @@ _DERIVED = {
 _skipped_derived = []
 for _k, _v in _OVERRIDES.items():
     if _k in _OV_USED:
-        continue                      # 已经在定义处生效
+        continue                      # already took effect at its definition site
     if _k in _DERIVED:
-        # config_snapshot.json 是完整记录，派生量当然也在里面。直接拿快照当
-        # 覆盖文件用是很自然的需求(“照着那次实验再跑一遍”)，所以对快照跳过
-        # 派生量而不是报错 —— 它们会由上面的输入参数重新算出同样的值。
-        # 手写的覆盖文件仍然报错：那多半是真写错了。
+        # config_snapshot.json is a full record, so derived quantities are naturally
+        # in it too. Using a snapshot directly as an override file is a natural need
+        # ("re-run that same experiment"), so snapshots skip derived quantities rather
+        # than raising -- they'll be recomputed to the same values from the input
+        # parameters above. A hand-written override file still raises: that's most
+        # likely a genuine mistake.
         if _FROM_SNAPSHOT:
             _skipped_derived.append(_k)
             continue
         raise ValueError(
-            f"覆盖文件里的 {_k!r} 是派生量，不能直接改 —— 它由 N_SMARTICLES / "
-            f"BASE_* 算出来。请改那些输入参数。"
-            f"（如果这是 config_snapshot.json，它缺少 _snapshot 标记，"
-            f"可能是旧版本写的：用 experiments.py --from-snapshot 转一下）")
+            f"{_k!r} in the override file is a derived quantity and can't be changed directly -- it's computed from N_SMARTICLES / "
+            f"BASE_*. Change those input parameters instead."
+            f"(If this is config_snapshot.json, it's missing the _snapshot marker, "
+            f"possibly written by an old version: convert it with experiments.py --from-snapshot)")
     if _k not in globals():
         raise ValueError(
-            f"覆盖文件里的 {_k!r} 在 config.py 里不存在（拼错了？）")
+            f"{_k!r} in the override file doesn't exist in config.py (typo?)")
     globals()[_k] = _v
 if _skipped_derived:
-    print(f"[config] 快照里的 {len(_skipped_derived)} 个派生量已跳过"
-          f"（由输入参数重算）: {', '.join(sorted(_skipped_derived)[:6])}"
+    print(f"[config] Skipped {len(_skipped_derived)} derived quantities from the snapshot"
+          f"(recomputed from input parameters): {', '.join(sorted(_skipped_derived)[:6])}"
           f"{' ...' if len(_skipped_derived) > 6 else ''}")
 
 
 # =============================================================================
-# COMMAND_ARRAY 允许写成简写字符串
+# COMMAND_ARRAY may be written as a shorthand string
 # =============================================================================
-# 手写一个长度 N 的列表太痛苦，尤其 N=100。允许写成 gait.py 那套调试简写：
-#     COMMAND_ARRAY = "a-462"            # 全场 -462
-#     COMMAND_ARRAY = "a462; 0..8-851"   # 大部分 462，0~8 号 -851
-# gait.py 只依赖 naming.py，不反过来 import config，所以这里可以安全地用它。
+# Hand-writing a length-N list is painful, especially at N=100. Allow the
+# gait.py debug shorthand instead:
+#     COMMAND_ARRAY = "a-462"            # everyone -462
+#     COMMAND_ARRAY = "a462; 0..8-851"   # mostly 462, ids 0~8 are -851
+# gait.py only depends on naming.py, not the other way around (it never
+# imports config), so it's safe to use it here.
 if isinstance(COMMAND_ARRAY, str):
     from gait import build_command_array
     _spec = COMMAND_ARRAY
     COMMAND_ARRAY = build_command_array(_spec, N_SMARTICLES)
-    print(f"[config] COMMAND_ARRAY = {_spec!r} -> {N_SMARTICLES} 条指令")
+    print(f"[config] COMMAND_ARRAY = {_spec!r} -> {N_SMARTICLES} commands")
 elif len(COMMAND_ARRAY) != N_SMARTICLES:
-    # 不查的话会在 gait.GaitController 里以 IndexError 收场，看不出原因
+    # Without this check it fails as an IndexError deep inside gait.GaitController, obscuring the cause
     raise ValueError(
-        f"COMMAND_ARRAY 有 {len(COMMAND_ARRAY)} 条，但 N_SMARTICLES="
-        f"{N_SMARTICLES}。要么写成简写字符串(如 \"a-462\")让它自动展开，"
-        f"要么改用 CMD_A / CMD_B / CMD_A_FRACTION。")
+        f"COMMAND_ARRAY has {len(COMMAND_ARRAY)} entries, but N_SMARTICLES="
+        f"{N_SMARTICLES}. Either write it as a shorthand string (e.g. \"a-462\") to let it auto-expand, "
+        f"or use CMD_A / CMD_B / CMD_A_FRACTION instead.")
 
-# BODY_ASSIGNMENT 同理：长度必须匹配，否则 bodies.py 到一半才报
+# BODY_ASSIGNMENT likewise: length must match, otherwise bodies.py only reports it halfway through
 if len(BODY_ASSIGNMENT) != N_SMARTICLES:
     raise ValueError(
-        f"BODY_ASSIGNMENT 有 {len(BODY_ASSIGNMENT)} 项，但 N_SMARTICLES="
-        f"{N_SMARTICLES}。")
+        f"BODY_ASSIGNMENT has {len(BODY_ASSIGNMENT)} entries, but N_SMARTICLES="
+        f"{N_SMARTICLES}.")

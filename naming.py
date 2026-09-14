@@ -77,29 +77,32 @@ def _all_same(values: list) -> bool:
 # =============================================================================
 
 def timestamp(when=None) -> str:
-    """MMDD_HHMMSS —— 和实机侧 group0807_134945.csv 的时间戳格式一致。"""
+    """MMDD_HHMMSS -- matches the timestamp format used on the real-robot side, e.g. group0807_134945.csv."""
     return time.strftime("%m%d_%H%M%S", time.localtime(when))
 
 
 def generate_trial_name(n_robots: int, *_ignored, prefix: str = "trial",
                         when=None, **_kwargs) -> str:
     """
-    实验名 = 机器人总数 + 时间戳，例如 'trial_N17_0901_143022'。
+    Trial name = total robot count + timestamp, e.g. 'trial_N17_0901_143022'.
 
-    参数不再进名字：现在参数组合太多(策略、角色、覆盖率……)，编进去既记不全
-    又不好读；完整参数每次运行都写在 <out_dir>/config_snapshot.json 里，
-    要查配置看那个。时间戳保证两次运行不会互相覆盖。
+    Parameters no longer go into the name: there are now too many parameter
+    combinations (strategy, roles, coverage ratio, ...) to encode fully and
+    still read cleanly; the complete parameters are written to
+    <out_dir>/config_snapshot.json on every run, so check there for the
+    config. The timestamp guarantees two runs never overwrite each other.
 
-    旧调用形式 generate_trial_name(n, init_phases, omega=..., amplitude=...)
-    仍然可用，多余的参数会被忽略 —— 需要把参数编进名字的场合(sweep.py 的
-    批量扫描，batch/ 下的脚本要从目录名把 W1f/A1a 解析回来)请改用
-    generate_param_name()。
+    The old call form generate_trial_name(n, init_phases, omega=...,
+    amplitude=...) still works, and extra arguments are simply ignored -- for
+    cases that need parameters encoded in the name (sweep.py's batch sweeps,
+    or scripts under batch/ that parse W1f/A1a back out of the directory
+    name), use generate_param_name() instead.
 
     Parameters
     ----------
-    n_robots : 机器人总数
-    prefix   : 文件名前缀，默认 'trial'
-    when     : 时间戳用的 epoch 秒；None = 现在（测试里可以固定它）
+    n_robots : total robot count
+    prefix   : filename prefix, default 'trial'
+    when     : epoch seconds used for the timestamp; None = now (can be fixed in tests)
 
     Examples
     --------
@@ -117,11 +120,12 @@ def generate_param_name(
     prefix: str = "trial",
 ) -> str:
     """
-    把参数编进文件名（generate_trial_name 以前的行为）。
+    Encode parameters into the filename (generate_trial_name's former behavior).
 
-    sweep.py 仍然用它：批量扫描的每个格子必须能从目录名认出自己的
-    频率/幅度槽位，batch/batch_grouping.py 和 batch/batch_group_size.py 的
-    parse_exp_name() 正是这么读的。
+    sweep.py still uses this: each cell of a batch sweep must be identifiable
+    from its directory name for its frequency/amplitude slot, and that's
+    exactly what parse_exp_name() in batch/batch_grouping.py and
+    batch/batch_group_size.py reads back out.
 
     Generate a filename string from robot count, initial phases, frequency, and amplitude.
 

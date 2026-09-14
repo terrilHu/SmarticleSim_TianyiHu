@@ -350,11 +350,11 @@ def load_alignment_window(trial_dirs, last_n_frames, max_dist: float):
         else:
             continue
 
-        # 把 size=1 的 alignment 视为 0
+        # Treat alignment of size=1 groups as 0
         gdf = gdf.copy()
         gdf.loc[gdf["size"] == 1, "alignment"] = 0.0
 
-        # 手动算 size-weighted alignment per frame
+        # Manually compute size-weighted alignment per frame
         def sw_align(sub):
             total = sub["size"].sum()
             return (sub["size"] * sub["alignment"]).sum() / total if total > 0 else np.nan
@@ -362,7 +362,7 @@ def load_alignment_window(trial_dirs, last_n_frames, max_dist: float):
         df = gdf.groupby("Step").apply(sw_align).reset_index()
         df.columns = ["Step", "align_size_weighted"]
 
-        # 截取末尾窗口
+        # Keep only the trailing window
         steps = np.sort(df["Step"].unique())
         if last_n_frames and last_n_frames < len(steps):
             keep = set(steps[-last_n_frames:])
