@@ -21,6 +21,16 @@ the group command — roles only govern robots not claimed by any group rule.
 Add "override_group": True to a role to bump it above the group layer instead.
 Within the same layer, roles **earlier** in the list have higher priority.
 
+Layers therefore run in **priority order, highest first**, and each one hands the
+robots it claimed to the next as an exclusion set (skip_claimed, on by default):
+the role selector skips them and picks the next candidates in instead of selecting
+robots whose command is about to be overwritten. Without this, a role asking for
+n_per_end=18 would still return 36 robots every tick while only a dozen of them
+ever executed the role command — measured on datafile/compare/18_per_end_major:
+36 selected, ~24 overwritten by the group layer, 14.8 actually running the role
+command per tick. Only roles with override_group=True skip the exclusion, since
+landing on grouped robots is the whole point of those.
+
 Grouping reuses the exact functions from pos_all_alignment / pos_all_grouping rather
 than reimplementing them: the grouping seen in offline analysis (_alignment.csv,
 the A(n) curve) is the same definition the strategy acts on live, so "why was this
@@ -61,6 +71,11 @@ Two pitfalls — check before touching a layer
     running with that rule produced one 94-robot group + a single uniform command
     -851 across the field. Cap the upper bound so the percolated state is left to
     the role layer.
+    skip_claimed softens this but does not cure it: the role still picks from
+    whatever is unclaimed, so once the group rules claim literally everyone the
+    pool is empty and the role goes quiet. It also means a fixed-count role needs
+    2*n_per_end unclaimed robots to hit its count — leave the group rules enough
+    headroom, or lower n_per_end.
 (b) **PCA-family selectors abstain on circular aggregates** — by design: the major
     axis direction of a disk is noise (see min_anisotropy in spatial_roles).
     group_major_ends suits **elongated** formations; for compact swarms use a
@@ -148,7 +163,13 @@ def _check_selector_kwargs(selector, kwargs, where):
         # e.g. sel_largest_group_major_ends(ids, pos, rec=None, **kw), whose
         # kwargs ultimately land on the function it delegates to
         accepted |= _named(sel_largest_group_axis_ends)
-    accepted -= {"ids", "pos", "rec"}
+    if "exclude" in kwargs:
+        raise ValueError(
+            f"{where}: 'exclude' is not a role setting - the strategy fills it in "
+            f"each tick with the robots higher layers already claimed. Use "
+            f"skip_claimed=False on the strategy to turn that off.")
+    # Filled in by the caller, not by the spec
+    accepted -= {"ids", "pos", "rec", "exclude"}
     unknown = sorted(set(kwargs) - accepted)
     if unknown:
         raise ValueError(
@@ -295,7 +316,7 @@ class LayeredStrategy:
     def __init__(self, max_dist, leave_command,
                  group_rules=(), roles=(),
                  period=0.25, group_n_ticks=6,
-                 include_singletons=True, verbose=False):
+                 include_singletons=True, skip_claimed=True, verbose=False):
         """
         max_dist       Voronoi adjacency distance threshold (pixels). Two robots
                        count as connected only if they are Delaunay neighbors and
@@ -326,11 +347,23 @@ class LayeredStrategy:
         period         how often to recompute, in seconds. The hysteresis "frame
                        count" counts ticks, so period=0.25 + n_frames_join=6 means
                        it takes ~1.5 seconds to confirm a role.
+        skip_claimed   True (default): layers run highest-priority first and each
+                       role selector is told to skip the robots already claimed by
+                       the group layer (and by higher-priority roles), so it picks
+                       the next candidates in rather than selecting robots whose
+                       command is about to be overwritten. A role asking for
+                       n_per_end robots per end then actually gets that many
+                       executing its command, as long as enough robots are left
+                       unclaimed — see the module docstring.
+                       False restores the old behaviour, where every role selects
+                       from the whole field and the merge silently overwrites the
+                       overlap. Set it to reproduce runs made before this change.
         """
         self.max_dist      = float(max_dist)
         self.leave_command = int(leave_command)
         self.period        = float(period)
         self.include_singletons = bool(include_singletons)
+        self.skip_claimed  = bool(skip_claimed)
         self.verbose       = bool(verbose)
 
         self.group_layer = (GroupRuleLayer(group_rules, n_ticks=group_n_ticks,
@@ -366,6 +399,22 @@ class LayeredStrategy:
         self._next_t = 0.0
         self.rec     = None       # last frame's grouping result, inspect directly when debugging
         self.ticks   = 0
+
+        # Every change in what the strategy **decided**, as (t, robot_id,
+        # command). This is the canonical record of a run's gait timeline:
+        # decide() is a deterministic function of the recorded positions, so
+        # replaying a trial's POS_ALL through a fresh LayeredStrategy
+        # regenerates this list exactly -- which is what lets trials predating
+        # the log be reconstructed on the same footing as ones that carry it.
+        #
+        # Deliberately NOT the same as what the robots were executing. A
+        # decision reaches the arm at the next phase zero-crossing, up to one
+        # gait period later, and __call__ suppresses a request while a switch
+        # is already pending. Recording the decision keeps the timeline
+        # independent of both, at the cost of running slightly ahead of the
+        # hardware.
+        self.decisions    = []
+        self._last_decided = {}
 
     # ── Callback interface ──────────────────────────────────────────────────
 
@@ -403,8 +452,20 @@ class LayeredStrategy:
         """
         target = {int(i): self.leave_command for i in ids}          # Layer 3
 
-        # Update all role layers first (hysteresis counters must advance every
-        # tick), record members, then write into target by priority afterward.
+        # Layer 1 runs first, because what it claims is what the role selectors
+        # below it have to skip. Its result is still merged in afterwards, in
+        # priority order.
+        group_cmd = (self.group_layer.update(t, rec)
+                     if self.group_layer is not None else {})
+
+        # Robots already spoken for by a higher-priority layer. Grows as each
+        # role is resolved, so a later role also skips an earlier role's members
+        # — same principle, same reason: otherwise its command is just overwritten.
+        claimed = {int(r) for r in group_cmd} if self.skip_claimed else set()
+
+        # Every role layer must be updated every tick so its hysteresis counters
+        # advance; members are recorded here and written into target by priority
+        # afterward.
         largest = int(rec["sizes"].max()) if len(rec["sizes"]) else 0
         members = []
         for role in self.roles:
@@ -412,8 +473,15 @@ class LayeredStrategy:
             cond = role["enabled_when"]
             if cond is not None:
                 enabled = _in_range(largest, cond.get("largest_group_size"))
-            members.append(role["tracker"].update(t, rec["ids"], rec["pos"],
-                                                  rec=rec, enabled=enabled))
+            # An override_group role outranks the group layer, so grouped robots
+            # are legitimate targets for it and it must not skip them. It still
+            # skips higher-priority roles' members.
+            skip = claimed - (group_cmd.keys() if role["override_group"] else set())
+            mids = role["tracker"].update(t, rec["ids"], rec["pos"], rec=rec,
+                                          enabled=enabled, exclude=skip)
+            members.append(mids)
+            if self.skip_claimed:
+                claimed |= {int(m) for m in mids}
 
         def _apply_roles(want_override):
             # Write in reverse order, so roles **earlier** in the list are
@@ -426,10 +494,16 @@ class LayeredStrategy:
                     target[int(mid)] = role["command"]
 
         _apply_roles(False)                                         # Layer 2
-        if self.group_layer is not None:                            # Layer 1
-            for rid, cmd in self.group_layer.update(t, rec).items():
-                target[int(rid)] = cmd
+        for rid, cmd in group_cmd.items():                          # Layer 1
+            target[int(rid)] = cmd
         _apply_roles(True)      # override_group roles sit on top of group commands
+
+        # Record only the changes: at steady state this appends nothing, and the
+        # forward-filled list is the full per-robot timeline.
+        for rid, cmd in target.items():
+            if self._last_decided.get(rid) != cmd:
+                self._last_decided[rid] = cmd
+                self.decisions.append((float(t), int(rid), int(cmd)))
 
         return target
 

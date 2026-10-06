@@ -21,6 +21,16 @@ command from them:
 So a robot that is both the x-minimum AND in a large group runs the group's
 command -- the role never overrides it.
 
+Because of that ordering, strategy.py runs Layer 1 first and hands the robots
+it already claimed to the selector as ``exclude``. Every selector here takes
+that set and **drops those robots from the pool it picks out of, without
+changing the geometry it measures** -- the PCA axis is still fit from the
+whole group, the centroid still from every robot; only the candidates change.
+So a fixed-count selector (anything with n_per_end / n) keeps returning its
+full count, drawn from robots the group layer has not taken, instead of
+returning a set that is mostly overwritten one layer later. See
+_ends_by_projection.
+
 Selectors are all pure functions that "eat one frame's (ids, pos) and spit
 out a set of marker ids", so adding a new rule only requires writing a
 function and registering it in SELECTORS -- no need to touch the controller.
@@ -32,9 +42,20 @@ branches related to miss_tolerance never actually trigger -- they're kept
 purely so the two sides stay structurally identical.
 """
 
+import inspect
 from typing import Callable, Dict, List, Set
 
 import numpy as np
+
+
+def _accepts_kwarg(fn, name) -> bool:
+    """Whether fn can be called with name=... -- either it names the parameter or it takes **kwargs."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return (name in params
+            or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()))
 
 
 def needs_group_record(fn):
@@ -50,71 +71,174 @@ def needs_group_record(fn):
     return fn
 
 
+def _pool_mask(ids, exclude) -> np.ndarray:
+    """Boolean mask over ids: True = still a candidate, False = excluded.
+
+    exclude holds **robot ids**, not indices into ids -- the caller (the role
+    layer) knows which robots a higher layer claimed, it doesn't know this
+    frame's row order.
+    """
+    ids = np.asarray(ids)
+    if exclude is None or len(exclude) == 0 or len(ids) == 0:
+        return np.ones(len(ids), dtype=bool)
+    ex = {int(x) for x in exclude}
+    return np.fromiter((int(i) not in ex for i in ids), dtype=bool, count=len(ids))
+
+
 # =============================================================================
 # Selectors: (ids, pos) -> set(marker id)
 #   ids (k,)  marker id
 #   pos (k,2) pixel coordinates; note the image coordinate system has y pointing down
+#
+# Every selector takes exclude=<iterable of robot ids>: those robots are removed
+# from the candidate pool but still count toward any geometry the selector
+# measures (centroid, PCA axis, group membership).
 # =============================================================================
 
-def sel_extremes(ids, pos) -> Set[int]:
+def sel_extremes(ids, pos, exclude=None) -> Set[int]:
     """Min/max x, min/max y -- the four extreme points of the formation.
 
     Ties take the first argmin/argmax, so the same robot may occupy two roles
     at once (e.g. it's both leftmost and topmost), in which case the returned
     set naturally contains just that one robot, fewer than 4.
     """
-    if len(ids) == 0:
+    ids = np.asarray(ids)
+    pos = np.asarray(pos, dtype=float).reshape(-1, 2)
+    idx = np.flatnonzero(_pool_mask(ids, exclude))
+    if len(idx) == 0:
         return set()
-    return {int(ids[i]) for i in (np.argmin(pos[:, 0]), np.argmax(pos[:, 0]),
-                                  np.argmin(pos[:, 1]), np.argmax(pos[:, 1]))}
+    p = pos[idx]
+    return {int(ids[idx[i]]) for i in (np.argmin(p[:, 0]), np.argmax(p[:, 0]),
+                                       np.argmin(p[:, 1]), np.argmax(p[:, 1]))}
 
 
-def sel_x_extremes(ids, pos) -> Set[int]:
+def sel_x_extremes(ids, pos, exclude=None) -> Set[int]:
     """Only take min/max x"""
-    if len(ids) == 0:
+    ids = np.asarray(ids)
+    pos = np.asarray(pos, dtype=float).reshape(-1, 2)
+    idx = np.flatnonzero(_pool_mask(ids, exclude))
+    if len(idx) == 0:
         return set()
-    return {int(ids[np.argmin(pos[:, 0])]), int(ids[np.argmax(pos[:, 0])])}
+    p = pos[idx, 0]
+    return {int(ids[idx[np.argmin(p)]]), int(ids[idx[np.argmax(p)]])}
 
 
-def sel_y_extremes(ids, pos) -> Set[int]:
+def sel_y_extremes(ids, pos, exclude=None) -> Set[int]:
     """Only take min/max y"""
-    if len(ids) == 0:
+    ids = np.asarray(ids)
+    pos = np.asarray(pos, dtype=float).reshape(-1, 2)
+    idx = np.flatnonzero(_pool_mask(ids, exclude))
+    if len(idx) == 0:
         return set()
-    return {int(ids[np.argmin(pos[:, 1])]), int(ids[np.argmax(pos[:, 1])])}
+    p = pos[idx, 1]
+    return {int(ids[idx[np.argmin(p)]]), int(ids[idx[np.argmax(p)]])}
 
 
-def sel_convex_hull(ids, pos) -> Set[int]:
-    """Robots on the convex hull of the whole formation -- a more complete "edge" definition than the four extreme points"""
-    if len(ids) < 3:
-        return {int(i) for i in ids}
+def sel_convex_hull(ids, pos, exclude=None) -> Set[int]:
+    """Robots on the convex hull of the whole formation -- a more complete "edge" definition than the four extreme points
+
+    With exclude given, the hull is **re-fit on the remaining robots**: unlike
+    the fixed-count selectors there is no "next candidate" to fall back on, so
+    the only meaningful reading of "skip these and look again" is the boundary
+    of what is left.
+    """
+    ids = np.asarray(ids)
+    pos = np.asarray(pos, dtype=float).reshape(-1, 2)
+    idx = np.flatnonzero(_pool_mask(ids, exclude))
+    if len(idx) < 3:
+        return {int(ids[i]) for i in idx}
     try:
         from scipy.spatial import ConvexHull
-        return {int(ids[i]) for i in ConvexHull(pos).vertices}
+        return {int(ids[idx[i]]) for i in ConvexHull(pos[idx]).vertices}
     except Exception:
-        return sel_extremes(ids, pos)
+        return sel_extremes(ids, pos, exclude=exclude)
 
 
-def sel_farthest_from_centroid(ids, pos, n=4) -> Set[int]:
-    """The n robots farthest from the centroid"""
+def _by_centroid_distance(ids, pos, n, farthest, exclude=None) -> Set[int]:
+    """
+    Shared core of the two centroid selectors: rank by distance to the
+    formation's centroid and take n from one end of that ranking.
+
+    The centroid is always over **every** robot passed in, including any that
+    `exclude` removes from the pool -- excluding a robot must not move the
+    reference point, or the role would redefine "the middle" every time a
+    higher layer claimed someone. Same rule as the PCA family.
+
+    Ties are broken by argsort order, i.e. by position in `ids`. That only
+    matters when two robots are equidistant to floating-point exactness, which
+    in practice means the field is symmetric and either answer is as good.
+    """
+    ids = np.asarray(ids)
+    pos = np.asarray(pos, dtype=float).reshape(-1, 2)
     if len(ids) == 0:
         return set()
     d = np.linalg.norm(pos - pos.mean(axis=0), axis=1)
-    return {int(ids[i]) for i in np.argsort(d)[::-1][:n]}
+    idx = np.flatnonzero(_pool_mask(ids, exclude))
+    if len(idx) == 0:
+        return set()
+    order = idx[np.argsort(d[idx], kind="mergesort")]
+    if farthest:
+        order = order[::-1]
+    return {int(ids[i]) for i in order[:max(1, int(n))]}
 
 
-def _ends_by_projection(ids, pos, V, cols, n_per_end):
+def sel_farthest_from_centroid(ids, pos, n=4, exclude=None) -> Set[int]:
+    """
+    The n robots farthest from the centroid -- the formation's outermost
+    stragglers, whichever direction they happen to lie in.
+
+    Shape-agnostic, unlike the PCA family: it never abstains on a round
+    formation, which makes it the fallback when group_*_ends gives up because
+    the swarm has no meaningful long axis.
+    """
+    return _by_centroid_distance(ids, pos, n, True, exclude)
+
+
+def sel_nearest_to_centroid(ids, pos, n=4, exclude=None) -> Set[int]:
+    """
+    The n robots closest to the centroid -- the core of the formation.
+
+    The complement of sel_farthest_from_centroid against the same reference
+    point, so the pair can drive an interior/exterior contrast: give the two
+    roles different commands and the inner core and the outer shell run
+    different gaits. Note they are complementary only in intent, not by
+    construction -- with n_inner + n_outer < the robot count some robots fall
+    through to leave_command, and past that the two sets would start to overlap
+    in the middle, where the earlier role in `roles` wins.
+    """
+    return _by_centroid_distance(ids, pos, n, False, exclude)
+
+
+def _ends_by_projection(ids, pos, V, cols, n_per_end, exclude=None):
     """Project points onto the given axes, taking n robots from each end of each axis.
 
     The origin used for projection doesn't affect the result: a translation
     just adds the same constant to every projection, and argsort is
     unaffected. So there's no need to fuss over whether to use the group's
     centroid or the whole field's centroid.
+
+    exclude drops robots from the ordering **after** it is built, so the ends
+    are the n outermost robots that are still available -- the rank a claimed
+    robot used to occupy is filled by the next one in, rather than being lost.
+    That is what keeps the count at n_per_end per end when a higher layer has
+    already taken the true extremes.
+
+    The count only falls short when fewer than 2*n_per_end candidates remain on
+    an axis: the two ends then overlap and the union is the whole pool. With
+    n_per_end=18 and 70 of 100 robots claimed by the group layer, 36 > 30, so
+    30 is all you get -- keep n_per_end well under half the expected number of
+    unclaimed robots.
     """
+    ids = np.asarray(ids)
     proj = np.asarray(pos, dtype=float) @ V
+    keep = _pool_mask(ids, exclude)
     out = set()
     k = max(1, int(n_per_end))
     for c in cols:
         order = np.argsort(proj[:, c])
+        order = order[keep[order]]
+        if len(order) == 0:
+            continue
         for i in order[:k]:
             out.add(int(ids[i]))
         for i in order[-k:]:
@@ -149,10 +273,15 @@ def principal_axes(pos):
     return ctr, sigma, V, ratio
 
 
-def sel_principal_ends(ids, pos, axis="both", n_per_end=1, min_anisotropy=1.5):
+def sel_principal_ends(ids, pos, axis="both", n_per_end=1, min_anisotropy=1.5,
+                       exclude=None):
     """
     Fit the principal axes (PCA) from every robot's position, and take the
     robots at the ends of the major and/or minor axis.
+
+    exclude never enters the PCA -- the axis is the formation's own
+    orientation and must not shift just because a higher layer claimed a few
+    robots. It only removes them from the ends.
 
         axis           "major" only takes the major-axis ends / "minor" only takes the minor-axis ends / "both" takes both axes
         n_per_end      how many robots to take from each end (the n farthest out by projection)
@@ -178,7 +307,7 @@ def sel_principal_ends(ids, pos, axis="both", n_per_end=1, min_anisotropy=1.5):
     ids = np.asarray(ids)
     pos = np.asarray(pos, dtype=float).reshape(-1, 2)
     if len(ids) < 3:
-        return {int(i) for i in ids}
+        return {int(i) for i in ids[_pool_mask(ids, exclude)]}
 
     _ctr, sigma, V, ratio = principal_axes(pos)
     if sigma[1] < 1e-9:            # all points coincide, there isn't even a major axis
@@ -194,7 +323,7 @@ def sel_principal_ends(ids, pos, axis="both", n_per_end=1, min_anisotropy=1.5):
         if not cols:
             return set()
 
-    return _ends_by_projection(ids, pos, V, cols, n_per_end)
+    return _ends_by_projection(ids, pos, V, cols, n_per_end, exclude)
 
 
 def sel_major_ends(ids, pos, **kw):
@@ -211,7 +340,7 @@ def sel_minor_ends(ids, pos, **kw):
 def sel_largest_group_axis_ends(ids, pos, rec=None, axis="both", n_per_end=1,
                                 min_anisotropy=1.5, min_group_size=3,
                                 max_group_size=None, min_lead=0,
-                                select_from="all"):
+                                select_from="all", exclude=None):
     """
     Fit the principal axes from **only the current largest group**, take just
     its **direction**, then project all robots onto those two directions and
@@ -242,6 +371,12 @@ def sel_largest_group_axis_ends(ids, pos, rec=None, axis="both", n_per_end=1,
                         cluster of robots; set 1~2 to treat this case as
                         undetermined. Default 0 = no requirement.
         select_from     "all" picks endpoints across the whole field (default) / "group" picks only within that group
+        exclude         robot ids a higher layer already claimed. They still
+                        define the group and its axis -- only the endpoint pool
+                        drops them. Note that with select_from="group" the pool
+                        is the group itself, so if every member is claimed the
+                        result is empty; that combination only makes sense when
+                        the group rules leave part of the group unclaimed.
 
     Returning an empty set means "this role cannot be defined this frame";
     SpatialRoleTracker keeps the current role membership unchanged.
@@ -276,8 +411,9 @@ def sel_largest_group_axis_ends(ids, pos, rec=None, axis="both", n_per_end=1,
 
     # Step 2: project robots onto these two directions and take the ends
     if select_from == "group":
-        return _ends_by_projection(all_ids[sel], all_pos[sel], V, cols, n_per_end)
-    return _ends_by_projection(all_ids, all_pos, V, cols, n_per_end)
+        return _ends_by_projection(all_ids[sel], all_pos[sel], V, cols,
+                                   n_per_end, exclude)
+    return _ends_by_projection(all_ids, all_pos, V, cols, n_per_end, exclude)
 
 
 @needs_group_record
@@ -297,7 +433,8 @@ SELECTORS: Dict[str, Callable] = {
     "x_extremes": sel_x_extremes,
     "y_extremes": sel_y_extremes,
     "convex_hull": sel_convex_hull,
-    "farthest": sel_farthest_from_centroid,
+    "farthest": sel_farthest_from_centroid,   # outermost n, by distance to the centroid
+    "nearest": sel_nearest_to_centroid,       # innermost n, same reference point
     "principal_ends": sel_principal_ends,     # major + minor axis, four ends total
     "major_ends": sel_major_ends,             # major-axis ends only
     "minor_ends": sel_minor_ends,             # minor-axis ends only
@@ -353,6 +490,11 @@ class SpatialRoleTracker:
             self.name = selector
         self.label = label or self.name
         self.kwargs = kwargs
+        # Every selector in SELECTORS takes exclude; a hand-written one may not,
+        # and for those the excluded robots are filtered out of the result
+        # instead (correct, but the count can come up short). Resolved once here
+        # rather than per frame.
+        self._takes_exclude = _accepts_kwarg(self.selector, "exclude")
         self.n_join = n_frames_join
         self.n_leave = n_frames_leave
         self.miss_tolerance = miss_tolerance
@@ -365,11 +507,19 @@ class SpatialRoleTracker:
         self.events: List[dict] = []
         self.frames = 0
 
-    def update(self, ts, ids, pos, rec=None, enabled=True) -> Set[int]:
+    def update(self, ts, ids, pos, rec=None, enabled=True,
+               exclude=None) -> Set[int]:
         """
         Eats one frame's (ids, pos), returns the current set of role members.
         rec is the whole frame's grouping result, passed through only to
         selectors marked with @needs_group_record.
+
+        exclude is the set of robots a higher-priority layer already claimed
+        this frame; the selector skips them and picks further in instead. A
+        robot that is currently a member and then gets claimed simply stops
+        being selected, so it leaves through the normal n_frames_leave
+        hysteresis while its replacement joins through n_frames_join -- the
+        handover is not instant, by design.
 
         enabled=False means "this layer doesn't apply this frame" (e.g. the
         largest group's size fell outside the configured range). In that
@@ -386,7 +536,11 @@ class SpatialRoleTracker:
             kw = dict(self.kwargs)
             if getattr(self.selector, "needs_rec", False):
                 kw["rec"] = rec
+            if exclude and self._takes_exclude:
+                kw["exclude"] = exclude
             chosen = self.selector(ids, pos, **kw) if len(ids) else set()
+            if exclude and not self._takes_exclude:
+                chosen = {int(c) for c in chosen} - {int(x) for x in exclude}
         else:
             chosen = set()
         seen = {int(x) for x in ids}
@@ -399,6 +553,10 @@ class SpatialRoleTracker:
         # information this frame", counters are left as-is. But enabled=False
         # is an explicit "not applicable" and must go through the exit flow,
         # so it's excluded from this.
+        # With exclude given there is a third way to land here: every candidate
+        # was claimed by a higher layer. Holding membership is still the right
+        # call -- those members are exactly the claimed robots, and the higher
+        # layer overwrites their command anyway, so nothing leaks through.
         if enabled and not chosen and len(ids):
             return set(self.members)
 

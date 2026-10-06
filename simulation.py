@@ -631,6 +631,80 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
             if _chunk:
                 f.write("".join(_chunk))
 
+    # Which gait each robot was assigned, as an **event list**: one row per
+    # robot for its initial COMMAND_ARRAY value, then one row per change.
+    # Forward-fill by robot_id to get the full timeline. A few hundred rows next
+    # to POS_ALL's hundreds of thousands, and nothing extra is computed during
+    # the run.
+    #
+    # What gets recorded is the **decision**, not the execution: the moment the
+    # strategy chose a command, not the zero-crossing where the arm picked it
+    # up. That is the definition analysis uses throughout, because it is the
+    # only one that can also be reconstructed for trials that predate this file
+    # -- LayeredStrategy.decide() is a deterministic function of the recorded
+    # positions, so replaying POS_ALL regenerates exactly this list. Recording
+    # the execution instead would make new trials incomparable with old ones.
+    # See batch_group_plots.reconstruct_gait_log.
+    #
+    # A controller that is not a LayeredStrategy has no decision log, so those
+    # runs fall back to GaitState.history -- the applied times. That is noted in
+    # the file's `source` column rather than silently mixed in.
+    try:
+        strat = getattr(gait_ctl, "ctx", {}).get("strategy")
+        decisions = getattr(strat, "decisions", None)
+        source = "decision" if decisions is not None else "applied"
+
+        rows = []
+        for st in gait_ctl.states:
+            # history only holds changes, so the initial command is the first
+            # entry's old_cmd — or the current one if it never switched
+            first = st.history[0][1] if st.history else st.command
+            if first is not None:
+                rows.append((0.0, st.robot_id, int(first)))
+        if decisions is not None:
+            rows.extend((float(t), int(rid), int(cmd))
+                        for t, rid, cmd in decisions)
+        else:
+            rows.extend((float(ts), st.robot_id, int(new))
+                        for st in gait_ctl.states
+                        for ts, _old, new in st.history)
+
+        # Rebase onto POS_ALL's clock. RECORD_AFTER_WARMUP means recording only
+        # starts once every robot is through its warm-up, so POS_ALL row 0 is
+        # sim time time_hist[0], not 0 — while the times above are raw sim
+        # time. Without this shift the pattern figure would sit ~WARMUP_STEPS
+        # ahead of every other curve plotted against the same axis.
+        # Everything at or before the first recorded frame collapses to t=0,
+        # keeping the **last** such value per robot: that is what a robot is
+        # already running when recording opens.
+        t0 = time_hist[0] if time_hist else 0.0
+        rows.sort(key=lambda r: (r[0], r[1]))
+        pre, post = {}, []
+        for t, rid, cmd in rows:
+            if t - t0 <= 0.0:
+                pre[rid] = cmd
+            else:
+                post.append((t - t0, rid, cmd))
+        rows = sorted((0.0, rid, cmd) for rid, cmd in pre.items()) + post
+
+        # Drop no-ops: an initial command the strategy then re-decides
+        # identically would otherwise read as a switch to itself
+        deduped, last = [], {}
+        for t, rid, cmd in rows:
+            if last.get(rid) != cmd:
+                last[rid] = cmd
+                deduped.append((t, rid, cmd))
+        rows = deduped
+
+        if rows:
+            with open(prefix + "_gait_log.csv", "w", newline="",
+                      encoding="utf-8") as f:
+                f.write("time,robot_id,command,source\r\n")
+                f.write("".join(f"{t:.6f},{rid},{cmd},{source}\r\n"
+                                for t, rid, cmd in rows))
+    except Exception as e:
+        print(f"[WARN] gait log write failed: {type(e).__name__}: {e}")
+
     if COVERAGE:
         with open(prefix + "_coverage.csv", "w", newline="", encoding="utf-8") as f:
             f.write("time,k,A_union,A0_sum,overlap,k_naive\r\n")

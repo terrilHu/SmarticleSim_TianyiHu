@@ -121,8 +121,8 @@ def _ov(name, default):
 
 # ── Trial / seed ──────────────────────────────────────────────────────────────
 TRIAL_SEED_BASE   = 12345
-N_TRIALS_GLOBAL   = _ov("N_TRIALS_GLOBAL", 10)       # 0 means auto-read from initial-conditions file
-MAX_RUNTIME       = _ov("MAX_RUNTIME", 500.0)    # in seconds
+N_TRIALS_GLOBAL   = _ov("N_TRIALS_GLOBAL", 1)       # 0 means auto-read from initial-conditions file
+MAX_RUNTIME       = _ov("MAX_RUNTIME", 30.0)    # in seconds
 
 # ── Initial-condition selection (only used when ALREADY_SPWANED = True) ────
 # "sequential" : use init_conditions[0], [1], [2] ... in order (default)
@@ -144,7 +144,7 @@ INIT_SELECTION    = "explicit"
 INIT_INDICES      = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]#[116, 87, 194]
 
 # ── Video recording ───────────────────────────────────────────────────────────
-RECORD_VIDEO      = True
+RECORD_VIDEO      = _ov("RECORD_VIDEO", True)
 RECORD_POLICY     = "mod"   # "mod" | "first_n" | "both"
 RECORD_EVERY_K    = 1       # record trials where (trial_id % K == 0)
 RECORD_FIRST_N    = 200       # record the first N trials
@@ -161,7 +161,7 @@ WARMUP_STEPS        = 180
 RECORD_AFTER_WARMUP = True
 
 # ── Experiment size ───────────────────────────────────────────────────────────
-N_SMARTICLES      = _ov("N_SMARTICLES", 100)         # number of smarticles in the simulation
+N_SMARTICLES      = _ov("N_SMARTICLES", 17)         # number of smarticles in the simulation
 
 # ── Reference geometry (used for auto-scaling) ────────────────────────────────
 BASE_N_REF        = _ov("BASE_N_REF", 17)         # population the reference arena was tuned for
@@ -174,16 +174,31 @@ BASE_ARM_W    = _ov("BASE_ARM_W", 6)
 # ── Population scaling ────────────────────────────────────────────────────────
 # Robot size is fixed, so putting N robots in the BASE_N_REF arena changes the
 # areal packing fraction as N/R^2.  With AUTO_SCALE_ARENA the arena (and the
-# window it is drawn in) grows as sqrt(N / BASE_N_REF), which holds the packing
-# fraction — and therefore the collective regime — constant as N grows.
+# window it is drawn in) scales as sqrt(N / BASE_N_REF), which holds the packing
+# fraction — and therefore the collective regime — constant in N.
 #
-#   N = 17  -> factor 1.0 exactly  -> every derived value below is UNCHANGED.
-#   N = 100 -> factor ~2.43        -> INNER_R 245 -> 594 px, window 2182x1843.
+#   N =   5 -> factor ~0.54        -> INNER_R 245 -> 132 px, window 488x412.
+#   N =  17 -> factor 1.0 exactly  -> every derived value below is UNCHANGED.
+#   N = 100 -> factor ~2.43        -> INNER_R 245 -> 594 px, window 2183x1843.
 #
-# Set to False to keep the fixed 900x760 / R=245 arena regardless of N (which
-# is only sensible for small N: 100 robots do not physically fit in R=245).
+# The factor runs **both ways**.  It used to be clamped at 1.0, which quietly
+# made every population below BASE_N_REF share the reference arena and so run at
+# a packing fraction of N/BASE_N_REF of it: 0.197 at N=10 and 0.098 at N=5,
+# against 0.334 at the reference.  That is a different collective regime, not a
+# smaller version of the same one, and it defeated the purpose of the knob.
+# Unclamped, every population sits at ~0.335.  Nothing at N >= BASE_N_REF
+# changes, and N == BASE_N_REF is still exactly 1.0.
+#
+# Shrinking leaves SCALE at 1.0 (the window shrinks with the arena, so the wall
+# still fits), which is what keeps the *robots* at their physical size while
+# only the arena moves — the whole point.
+#
+# Set to False to keep the fixed 900x760 / R=245 arena regardless of N.  For
+# N < BASE_N_REF that reproduces the old clamped behaviour exactly, so it is
+# also the way to rerun a small-N experiment from before this change.  For
+# N > BASE_N_REF it is rarely sensible: 100 robots do not fit in R=245.
 AUTO_SCALE_ARENA  = _ov("AUTO_SCALE_ARENA", True)
-_POP_SCALE        = (max(1.0, math.sqrt(N_SMARTICLES / BASE_N_REF))
+_POP_SCALE        = (math.sqrt(N_SMARTICLES / BASE_N_REF)
                      if AUTO_SCALE_ARENA else 1.0)
 
 # ── Screen / geometry ─────────────────────────────────────────────────────────
@@ -273,7 +288,7 @@ GAIT_BY_TYPE = {
 # gait_control.py (callback contract + ready-made controllers), strategy.py
 # (grouping/roles pipeline and its tuning notes).
 # False -> the callback is never resolved; results bit-identical to before.
-ENABLE_RUNTIME_GAIT_CONTROL = True
+ENABLE_RUNTIME_GAIT_CONTROL = False
 
 # "module:function".  See gait_control.py for what each one does:
 #   strategy | script | example_text | example_schedule
@@ -321,17 +336,30 @@ STRATEGY_SPEC = {
     #     "min_anisotropy": below this aspect ratio, direction is judged meaningless and no one is selected that frame (default 1.5)
     #     "min_group_size": below this size the largest group selects no one (group_*_ends)
     #     "select_from":    "all" selects endpoints across the whole field (default) / "group" selects only within that group
-    # "farthest" uses "n"; extremes / convex_hull and the like take no extra parameters.
+    # "farthest" (outermost n from the swarm centroid) and "nearest" (innermost
+    # n, same reference point) both use "n" -- pair them with different commands
+    # for an inner-core / outer-shell contrast.  Unlike the PCA family they
+    # never abstain on a round formation.
+    # extremes / convex_hull and the like take no extra parameters.
     #
     # "override_group": True promotes this role **above** the grouping layer --
     # default False, meaning once a robot is claimed by a group_rule it runs
-    # the group's command and the role layer has no say over it.
+    # the group's command and the role layer has no say over it.  With
+    # skip_claimed on (below) such a robot is not selected in the first place;
+    # the selector picks the next candidate in, so the role still gets its full
+    # n_per_end.
     "roles": [
         # {"selector": "convex_hull", "command": -52,
         #  "n_frames_join": 18, "n_frames_leave": 18},
-        {"selector": "group_major_ends", "command": -52, "min_group_size": 3,
+        {"selector": "group_minor_ends", "command": -52, "min_group_size": 3,
          "n_per_end": 6, "override_group": False},
     ],
+
+    # Run the layers highest-priority first and let each role selector skip the
+    # robots the layers above it already claimed, instead of selecting them and
+    # having the merge overwrite the command.  Needs ~2*n_per_end unclaimed
+    # robots to fill a fixed-count role.  False = pre-2026-09 behaviour.
+    "skip_claimed": True,
 
     "verbose": False,                    # log group/role join+leave events
 }
@@ -374,7 +402,9 @@ RING_SHAPE     = _ov("RING_SHAPE", "polygon")     # "circle" (default) | "polygo
 # the edge length — and hence what a robot "sees" locally — constant.
 RING_N_SIDES_BASE     = _ov("RING_N_SIDES_BASE", 35)
 AUTO_SCALE_RING_SIDES = _ov("AUTO_SCALE_RING_SIDES", True)
-RING_N_SIDES   = (int(round(RING_N_SIDES_BASE * _POP_SCALE))
+# max(3, ...): the count scales down as well as up now, and a polygon needs at
+# least three sides to be one at all.
+RING_N_SIDES   = (max(3, int(round(RING_N_SIDES_BASE * _POP_SCALE)))
                   if AUTO_SCALE_RING_SIDES else RING_N_SIDES_BASE)
 
 # Mass: a MOVABLE ring is pushed by the swarm, so what determines the regime is
@@ -531,7 +561,7 @@ rho                 = N_SMARTICLES / (W * H)  # number density
 # Placed here so a single override file can fully determine one run -- in a
 # batch comparison experiment, each condition has its own initial-conditions
 # file and output location.
-INIT_FILE = "init_conditions/init_conditions_200_p.json"
+INIT_FILE = "init_conditions/init_conditions_200_p_N17.json"
 # Note: the robot count in the IC file must equal N_SMARTICLES; run_trial checks this on the spot.
 #   *_p_N17.json -> 17 robots   *_p_N50.json -> 50 robots   *_p.json -> 100 robots
 EXP_NAME  = None      # None = auto-generated by naming.generate_trial_name
