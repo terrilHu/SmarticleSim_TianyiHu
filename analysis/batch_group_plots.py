@@ -159,6 +159,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# The simulation modules (config, pos_all_grouping, strategy, gait, ...)
+# live one level up. Running this as `python analysis/<name>.py` puts only
+# analysis/ on the path, so the project root has to be added explicitly.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from pos_all_grouping import compute_frame_groups
 
 # Figure labels are always English: usable for both papers and reports, and it
@@ -364,12 +369,34 @@ def size_bins(n):
     a 9+ cap, which is fine for 17 robots; at 100 robots "9+" would dump the
     vast majority of robots into one bin and the plot would carry no information.
     """
-    if n <= 20:
-        edges = [1, 3, 5, 8]
-    elif n <= 60:
-        edges = [1, 3, 6, 12]
-    else:
-        edges = [1, 5, 10, 15]
+    match n:
+        case 10:
+            edges = [2, 5, 6]
+        case 17:
+            edges = [2, 5, 8]
+        case 35:
+            edges = [2, 5, 10]
+        case 50:
+            edges = [2, 5, 10]
+        case 75:
+            edges = [2, 5, 11]
+        case 100:
+            edges = [2, 5, 13]
+        case 150:
+            edges = [2, 5, 15]
+        case 300:
+            edges = [2, 5, 18]
+        case 500:
+            edges = [2, 5, 18]
+        case 1000:
+            edges = [2, 5, 19]
+
+    # if n <= 20:
+    #     edges = [1, 3, 5, 8]
+    # elif n <= 60:
+    #     edges = [1, 3, 6, 12]
+    # else:
+    #     edges = [1, 5, 10, 15]
     bins, labels, lo = [], [], 1
     for e in edges:
         bins.append((lo, e))
@@ -2168,6 +2195,9 @@ def main():
                          "and is unaffected")
     ap.add_argument("--radial-compare", default=None,
                     help="Also write one radial figure overlaying every experiment, to this path")
+    ap.add_argument("--labels", nargs="+", default=None,
+                    help="Legend name for each experiment in the --radial-compare figure, in the order the "
+                         "experiments are given (default: directory names)")
     ap.add_argument("--chain-min-size", type=int, default=3,
                     help="Smallest group treated as a chain in the chains figure (default 3)")
     ap.add_argument("--chain-bins", type=int, default=12,
@@ -2278,6 +2308,11 @@ def main():
 
     if args.radial_compare and radial_sink:
         names = [x[0] for x in radial_sink]
+        if args.labels:
+            if len(args.labels) != len(exps):
+                raise SystemExit(f"--labels has {len(args.labels)} names for {len(exps)} experiments")
+            rename = dict(zip((os.path.basename(os.path.normpath(e)) for e in exps), args.labels))
+            names = [rename.get(nm, nm) for nm in names]
         fig_radial([x[1] for x in radial_sink], names, [x[2] for x in radial_sink],
                    args.radial_compare,
                    f"  [{len(names)} experiments, max_dist={args.max_dist:g}]"

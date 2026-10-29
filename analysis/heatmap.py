@@ -6,6 +6,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import sys
+
+# The simulation modules (config, pos_all_grouping, strategy, gait, ...)
+# live one level up. Running this as `python analysis/<name>.py` puts only
+# analysis/ on the path, so the project root has to be added explicitly.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from sweep import plot_heatmap, AMPLI_DICT, FREQ_DICT
 from pos_all_alignment import process_pos_all
 

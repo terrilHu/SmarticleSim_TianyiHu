@@ -123,6 +123,17 @@ _BAND_PALETTE = [
     (220,  80, 160, 255),   # pink
 ]
 
+# Flat colour for a ring drawn with no bands (RING_COLOR_BANDS = 0).
+#
+# Set explicitly rather than left to pymunk's defaults. Those are
+# shape_static_color = grey(149,165,166) and shape_dynamic_color =
+# blue(52,152,219), and the robot's main body carries no colour of its own, so
+# it is drawn in that same dynamic blue -- a movable ring falling back to the
+# default would be the exact colour of the robots it contains. Naming the two
+# here also pins them against a future change in pymunk's defaults.
+RING_FLAT_COLOR_STATIC  = (52, 152, 219, 255)    # blue
+RING_FLAT_COLOR_MOVABLE = (149, 165, 166, 255)   # grey
+
 
 def _color_ring_segments(segments, n_bands, angle_fn):
     """
@@ -138,9 +149,20 @@ def _color_ring_segments(segments, n_bands, angle_fn):
         The value only needs to be consistent within [0, 2π); wrapping is
         handled here.
     """
-    if not n_bands:
-        return
     import pygame
+    if not n_bands:
+        # No bands: still paint, so the ring never inherits the colour the
+        # robots are drawn in. Static vs movable is read off the segments
+        # themselves -- every caller has already attached them to the right
+        # body type by this point.
+        movable = any(seg.body is not None
+                      and seg.body.body_type != pymunk.Body.STATIC
+                      for seg in segments)
+        r, g, b, a = (RING_FLAT_COLOR_MOVABLE if movable
+                      else RING_FLAT_COLOR_STATIC)
+        for seg in segments:
+            seg.color = pygame.Color(r, g, b, a)
+        return
     palette = _BAND_PALETTE
     two_pi  = 2.0 * math.pi
     for s in segments:

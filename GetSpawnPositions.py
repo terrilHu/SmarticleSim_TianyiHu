@@ -63,7 +63,7 @@ import subprocess
 import sys
 import time
 
-DEFAULT_TRIALS = 200
+DEFAULT_TRIALS = 24
 
 
 # =============================================================================

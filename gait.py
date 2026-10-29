@@ -429,7 +429,7 @@ class RobotView:
 
     __slots__ = ("id", "x", "y", "angle", "vx", "vy", "dist_to_center",
                  "command", "freq_hz", "ampli", "phase1", "phase2",
-                 "antiphase", "pending_cmd")
+                 "antiphase", "pending_cmd", "thL", "thR")
 
     def __init__(self, sm, state, cx, cy):
         p  = sm.main_body.position
@@ -448,6 +448,12 @@ class RobotView:
         self.phase2         = state.phase2
         self.antiphase      = state.antiphase
         self.pending_cmd    = state.pending_cmd
+        # Achieved joint angles, relative to the body. `ampli` above is
+        # what was *commanded*; these are what the PD controller actually
+        # reached, which is the only way to tell whether a high-frequency
+        # gait is being tracked or merely requested.
+        self.thL            = sm.left_body.angle  - sm.main_body.angle
+        self.thR            = sm.right_body.angle - sm.main_body.angle
 
     def __repr__(self):
         return (f"<RobotView id={self.id} cmd={self.command} "

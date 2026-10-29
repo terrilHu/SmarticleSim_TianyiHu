@@ -318,7 +318,7 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     orig_surf        = pygame.Surface((W, H))
     font             = pygame.font.Font(None, 16)
     draw_options_orig = pymunk.pygame_util.DrawOptions(orig_surf)
-
+    draw_options_orig.constraint_color = (110, 110, 110, 255)
     # Glyph surfaces depend only on the label text, so render each label once
     # and reuse it for every frame: identical pixels, but ~2n fewer
     # font.render() calls per frame (this dominates at n = 100).
