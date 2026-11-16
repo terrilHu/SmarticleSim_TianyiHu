@@ -102,7 +102,8 @@ def process_pos_all(csv_path: str, max_dist: float) -> pd.DataFrame:
     Returns:
         DataFrame with columns: [Step, mean_alignment]
     """
-    df = pd.read_csv(csv_path)
+    from pos_all_io import read_pos_all   # .csv or .npz
+    df = read_pos_all(csv_path)
     df.columns = df.columns.str.strip()
 
     n_agents   = df["Agent_ID"].nunique()

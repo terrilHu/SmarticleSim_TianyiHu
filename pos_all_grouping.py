@@ -193,7 +193,8 @@ def process_pos_all_groups(csv_path: str,
     `group_local_id` is a per-frame local index (resets each frame). A future
     `track_groups()` adds a persistent `group_global_id` on top of this table.
     """
-    df = pd.read_csv(csv_path)
+    from pos_all_io import read_pos_all   # .csv or .npz
+    df = read_pos_all(csv_path)
     df.columns = df.columns.str.strip()
 
     steps = sorted(df["Step"].unique())

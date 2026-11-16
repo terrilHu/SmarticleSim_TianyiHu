@@ -289,6 +289,10 @@ _CMD_A_FRACTION   = _ov("CMD_A_FRACTION", 0 / 17)
 _n_cmd_a          = int(round(N_SMARTICLES * _CMD_A_FRACTION))
 COMMAND_ARRAY = [_CMD_A] * _n_cmd_a + [_CMD_B] * (N_SMARTICLES - _n_cmd_a)
 random.shuffle(COMMAND_ARRAY)
+# Public copies, so config_snapshot.json records the mix (the _-prefixed names
+# are skipped by the snapshot) and branch.py --cmd-a-fraction knows which
+# command is "A" and which is "B" in the run it branches from.
+CMD_A, CMD_B, CMD_A_FRACTION = _CMD_A, _CMD_B, _CMD_A_FRACTION
 
 # Or in the debug shorthand (gait.py), deterministic by id rather than shuffled:
 #   from gait import build_command_array
@@ -479,6 +483,30 @@ SAVE_RENDER_STATE = _ov("SAVE_RENDER_STATE", True)
 # runtime at large n (~38% of a profiled N=500 run, against 11% for the
 # physics itself).  Off by default; set True to get those files back.
 LEGACY_PAIR_METRICS = _ov("LEGACY_PAIR_METRICS", False)
+
+# Checkpoints, for branching a run: write the full world state (physics,
+# robots, gait controller + live strategy, loop counters, RNG) every
+# CHECKPOINT_EVERY simulated seconds, plus one at t = 0 and one at the end, to
+# <trial folder>/checkpoints/. Any recorded moment can then be resumed --
+# replay from the nearest earlier checkpoint to it, change the strategy, run
+# on -- and the pieces stitched into one trial.
+#
+# The run continues from its own reloaded checkpoint each time (pymunk does
+# not pickle its contact cache, so that is what makes replay exact; see
+# checkpoint.py). Consequence: a run with this on is a different realisation
+# from the same config with it off -- statistically the same, not byte-equal.
+#
+# Measured cost at 5 s: N=500 ~0.30 MB per checkpoint (~30 MB, ~5% on top of
+# a 500 s trial's output) and ~0.6 s wall each (~10% run time); N=100
+# ~0.08 MB each.
+CHECKPOINT_ENABLED        = _ov("CHECKPOINT_ENABLED", False)
+CHECKPOINT_EVERY          = _ov("CHECKPOINT_EVERY", 5.0)    # simulated seconds
+CHECKPOINT_COMPRESS_LEVEL = 6       # zlib level; lzma was only 20% smaller, 10x slower
+
+# On-disk format of trial_XXXX_POS_ALL: "csv" (the original) or "npz"
+# (float32, ~1/5 the size; see pos_all_io.py). branch.py and stitch.py always
+# write npz. Analysis entry points read both through pos_all_io.read_pos_all.
+POS_ALL_FORMAT = _ov("POS_ALL_FORMAT", "csv")
 
 # ── Actuation ─────────────────────────────────────────────────────────────────
 # === THIS IS WHERE YOU CONTROL JOINT MOTION ===

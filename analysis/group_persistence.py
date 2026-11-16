@@ -83,11 +83,13 @@ def sampled_labels(trial_dir):
         from group_lifetimes import load_labels
         L = load_labels(cache[0], stride)
         return np.arange(len(L)) * stride / FPS, L
-    return labels_from_pos_all(glob.glob(os.path.join(trial_dir, "*_POS_ALL.csv"))[0], stride)
+    from pos_all_io import find_pos_all
+    return labels_from_pos_all(find_pos_all(trial_dir), stride)
 
 
 def labels_from_pos_all(path, stride):
-    df = pd.read_csv(path, usecols=["Step", "Agent_ID", "X", "Y", "Theta"])
+    from pos_all_io import read_pos_all   # .csv or .npz
+    df = read_pos_all(path, usecols=["Step", "Agent_ID", "X", "Y", "Theta"])
     df = df[df["Step"] % stride == 0].sort_values(["Step", "Agent_ID"], kind="mergesort")
     steps = np.unique(df["Step"].to_numpy())
     aid_all = df["Agent_ID"].to_numpy()

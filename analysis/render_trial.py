@@ -127,7 +127,7 @@ def main():
     npz = glob.glob(os.path.join(folder, "*_render.npz"))
     pos = find_pos_all(folder)
     if not npz or not pos:
-        print("Need both *_render.npz and *_POS_ALL.csv in " + folder)
+        print("Need both *_render.npz and *_POS_ALL.csv/.npz in " + folder)
         if not npz:
             print("  No render state: this trial predates SAVE_RENDER_STATE. "
                   "The ring outline and arm angles were never recorded, so the "
@@ -145,7 +145,8 @@ def main():
     W, H = int(snap["W"]), int(snap["H"])
     ds = args.downscale if args.downscale is not None else int(snap.get("VIDEO_DOWNSCALE", 1))
 
-    df = pd.read_csv(pos, usecols=["Step", "Agent_ID", "X", "Y", "Theta"])
+    from pos_all_io import read_pos_all
+    df = read_pos_all(pos, usecols=["Step", "Agent_ID", "X", "Y", "Theta"])
     df = df.sort_values(["Step", "Agent_ID"], kind="mergesort")
     steps = df["Step"].unique()
     n = len(df) // len(steps)

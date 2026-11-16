@@ -168,6 +168,7 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pos_all_grouping import frame_group_columns
+from pos_all_io import read_pos_all, sidecar as pos_all_sidecar
 
 # Figure labels are always English: usable for both papers and reports, and it
 # avoids a cross-machine Chinese font dependency
@@ -415,8 +416,9 @@ def size_bins(n):
 # =============================================================================
 
 def find_pos_all(folder):
-    hits = sorted(glob.glob(os.path.join(folder, "*_POS_ALL.csv")))
-    return hits[0] if hits else None
+    """*_POS_ALL.csv, or the *_POS_ALL.npz branches and stitched trials write."""
+    import pos_all_io
+    return pos_all_io.find_pos_all(folder)
 
 
 def find_trials(exp_dir):
@@ -469,7 +471,7 @@ def write_groups_csv(pos_all_csv, groups_csv, max_dist, include_singletons=True,
     Written to .tmp and renamed: a killed run never leaves a partial cache that
     looks complete.
     """
-    df = pd.read_csv(pos_all_csv)
+    df = read_pos_all(pos_all_csv)
     df.columns = df.columns.str.strip()
     df = df.sort_values(["Step", "Agent_ID"], kind="mergesort")
     step_col = df["Step"].to_numpy()
@@ -515,7 +517,7 @@ def write_groups_csv(pos_all_csv, groups_csv, max_dist, include_singletons=True,
 
 def group_cache_path(pos_all_csv, max_dist, include_singletons=True):
     tag = f"{max_dist:g}".replace(".", "p")
-    cache = pos_all_csv.replace("_POS_ALL.csv", f"_groups_d{tag}.csv")
+    cache = pos_all_sidecar(pos_all_csv, f"_groups_d{tag}.csv")
     return cache if include_singletons else cache.replace(".csv", "_nosing.csv")
 
 
@@ -605,7 +607,7 @@ def reconstruct_gait_log(folder, fps, force=False):
     pos_all = find_pos_all(folder)
     if not pos_all:
         return None
-    out = pos_all.replace("_POS_ALL.csv", "_gait_log_rebuilt.csv")
+    out = pos_all_sidecar(pos_all, "_gait_log_rebuilt.csv")
     if os.path.isfile(out) and not force:
         return out
 
@@ -642,7 +644,7 @@ def reconstruct_gait_log(folder, fps, force=False):
                 print(f"      [note] {os.path.basename(folder)}: snapshot "
                       f"predates skip_claimed; replaying with it off, as the "
                       f"run did")
-            df = pd.read_csv(pos_all)
+            df = read_pos_all(pos_all)
             df.columns = df.columns.str.strip()
             df = df.sort_values(["Step", "Agent_ID"], kind="mergesort")
             step = df["Step"].to_numpy()
@@ -966,7 +968,7 @@ def series_cache_path(pos_all_csv, max_dist, include_singletons, bins):
     name = f"_series_d{tag}_b{sig}.npz"
     if not include_singletons:
         name = name.replace(".npz", "_nosing.npz")
-    return pos_all_csv.replace("_POS_ALL.csv", name)
+    return pos_all_sidecar(pos_all_csv, name)
 
 
 _SERIES_KEYS = ("secs", "largest", "mean_size", "alignment",
@@ -1369,7 +1371,7 @@ def radial_profile(pos_all_csv, groups_df, geom, nbins=20, min_size=3,
     """
     cx, cy, R, shape, n_sides = geom[:5]
     tag = f"b{nbins}_m{min_size}"
-    cache = pos_all_csv.replace("_POS_ALL.csv", f"_radial_{tag}.csv")
+    cache = pos_all_sidecar(pos_all_csv, f"_radial_{tag}.csv")
     if os.path.isfile(cache) and not force:
         c = pd.read_csv(cache)
         # size_sum arrived later than the rest; a cache without it predates the
@@ -1382,7 +1384,7 @@ def radial_profile(pos_all_csv, groups_df, geom, nbins=20, min_size=3,
                     "size_sum": c["size_sum"].to_numpy(dtype=float),
                     "area_frac": c["area_frac"].to_numpy(dtype=float)}
 
-    df = pd.read_csv(pos_all_csv, usecols=["Step", "Agent_ID", "X", "Y"])
+    df = read_pos_all(pos_all_csv, usecols=["Step", "Agent_ID", "X", "Y"])
     df.columns = df.columns.str.strip()
     r = np.hypot(df["X"].to_numpy(dtype=float) - cx,
                  df["Y"].to_numpy(dtype=float) - cy)
@@ -1609,14 +1611,14 @@ def chain_profile(pos_all_csv, groups_df, geom, nbins=12, min_size=3,
     """
     cx, cy, R = geom[0], geom[1], geom[2]
     ctr = np.array([cx, cy])
-    cache = pos_all_csv.replace("_POS_ALL.csv",
+    cache = pos_all_sidecar(pos_all_csv,
                                 f"_chains_m{min_size}_b{nbins}.csv")
     if os.path.isfile(cache) and not force:
         c = pd.read_csv(cache)
         return {k: c[k].to_numpy(dtype=float)
                 for k in ("r_mid", "obs_sum", "obs_n", "null_sum", "null_n")}
 
-    df = pd.read_csv(pos_all_csv, usecols=["Step", "Agent_ID", "X", "Y"])
+    df = read_pos_all(pos_all_csv, usecols=["Step", "Agent_ID", "X", "Y"])
     df.columns = df.columns.str.strip()
     df = df.sort_values(["Step", "Agent_ID"], kind="mergesort")
     steps, starts = np.unique(df["Step"].to_numpy(), return_index=True)
@@ -2024,7 +2026,7 @@ def process_experiment(exp_dir, args, radial_sink=None, chain_sink=None):
         n_max = snap_n
     else:
         for t in trials:
-            n_max = max(n_max, int(pd.read_csv(find_pos_all(t),
+            n_max = max(n_max, int(read_pos_all(find_pos_all(t),
                                                usecols=["Agent_ID"])
                                    ["Agent_ID"].nunique()))
     bins, labels = size_bins(n_max)

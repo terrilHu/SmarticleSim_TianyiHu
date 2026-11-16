@@ -520,6 +520,102 @@ class LayeredStrategy:
 
         return target
 
+    # ── Switching strategies mid-run ─────────────────────────────────────────
+
+    def inherit_state(self, old) -> dict:
+        """
+        Take over a running strategy's hysteresis so a switch made mid-run (a
+        branch) does not restart every confirmation from zero.
+
+        What a streak counts is a fact about the swarm, not about the command:
+        "robot 7 has been in a group whose size fits (6, 11) for 4 ticks", or
+        "robot 3 has been selected by group_major_ends for 5 frames". So state
+        moves across wherever the *condition* is the same, whatever command
+        the new spec attaches to it:
+
+          tick clock    _next_t / ticks, so ticks stay on the old schedule
+          decision log  decisions / _last_decided, so the gait log continues
+          group rules   matched by (size_range, alignment_range); a robot
+                        confirmed on an old rule is confirmed on its match and
+                        executes the new rule's command from the next tick
+          roles         matched by (selector, selector kwargs), in order; the
+                        tracker's members and join / leave / miss counters move
+
+        A rule or role with no match in the old spec starts empty. If max_dist
+        or include_singletons changed, the groups themselves are defined
+        differently, so group-rule streaks are not carried over (roles still
+        are; group-based selectors will re-settle on the new groups).
+
+        Returns a report of what was carried over.
+        """
+        rep = {"tick_clock": True, "decisions": len(old.decisions),
+               "group_rules": {}, "roles": {}, "notes": []}
+        self._next_t = old._next_t
+        self.ticks   = old.ticks
+        self.rec     = old.rec
+        self.decisions     = list(old.decisions)
+        self._last_decided = dict(old._last_decided)
+
+        same_groups = (self.max_dist == old.max_dist
+                       and self.include_singletons == old.include_singletons)
+
+        # ── Group rules ──────────────────────────────────────────────────────
+        def _key(rule):
+            def _t(r):
+                return None if r is None else tuple(r)
+            return (_t(rule["size_range"]), _t(rule["alignment_range"]))
+
+        ng, og = self.group_layer, old.group_layer
+        if ng is not None and og is not None:
+            if not same_groups:
+                rep["notes"].append(
+                    f"max_dist {old.max_dist} -> {self.max_dist} or include_singletons "
+                    f"changed: group-rule streaks reset")
+            else:
+                old_by_key = {}
+                for i, r in enumerate(og.rules):
+                    old_by_key.setdefault(_key(r), i)
+                remap = {}
+                for j, r in enumerate(ng.rules):
+                    i = old_by_key.get(_key(r))
+                    if i is not None and i not in remap:
+                        remap[i] = j
+                        rep["group_rules"][r["name"]] = og.rules[i]["name"]
+                for rid, (ri, c) in og._streak.items():
+                    if ri is None:
+                        ng._streak[rid] = (None, c)
+                    elif ri in remap:
+                        ng._streak[rid] = (remap[ri], c)
+                for rid, ri in og.assigned.items():
+                    if ri in remap:
+                        ng.assigned[rid] = remap[ri]
+                ng.ticks  = og.ticks
+                ng.events = list(og.events)
+        elif og is not None:
+            rep["notes"].append("new spec has no group rules")
+
+        # ── Roles ────────────────────────────────────────────────────────────
+        def _rkey(tr):
+            return (tr.name, repr(sorted(tr.kwargs.items())))
+
+        unused = list(range(len(old.roles)))
+        for role in self.roles:
+            tr = role["tracker"]
+            hit = next((i for i in unused
+                        if _rkey(old.roles[i]["tracker"]) == _rkey(tr)), None)
+            if hit is None:
+                continue
+            unused.remove(hit)
+            otr = old.roles[hit]["tracker"]
+            tr.members    = set(otr.members)
+            tr.streak_in  = dict(otr.streak_in)
+            tr.streak_out = dict(otr.streak_out)
+            tr.miss       = dict(otr.miss)
+            tr.events     = list(otr.events)
+            tr.frames     = otr.frames
+            rep["roles"][tr.label] = otr.label
+        return rep
+
     # ── Debugging ────────────────────────────────────────────────────────────
 
     def summary(self) -> str:

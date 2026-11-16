@@ -65,7 +65,8 @@ def style_axis(ax):
     ax.tick_params(colors=MUTED)
 
 
-def legend(fig, n_real, y=1.0):
+def legend(fig, n_real, y=1.0, metrics=None):
+    """metrics: optional [(key, name)] added as colour keys, for when nothing else names them."""
     from matplotlib.legend_handler import HandlerTuple
     n_txt = f"n = {n_real} trials, " if n_real else ""
     # source keys in neutral gray: color belongs to the metric, not the source
@@ -74,10 +75,13 @@ def legend(fig, n_real, y=1.0):
          plt.Rectangle((0, 0), 1, 1, color=KEY, alpha=0.18, lw=0)),
         plt.Line2D([], [], color=KEY, lw=2.0, ls=SIM_LS),
     ]
-    fig.legend(handles,
-               [f"Hardware ({n_txt}mean ± 1 sd)", "Simulation (1 trial)"],
+    labels = [f"Hardware ({n_txt}mean ± 1 sd)", "Simulation (1 trial)"]
+    for key, name in metrics or []:
+        handles.append(plt.Line2D([], [], color=C_METRIC[key], lw=2.0))
+        labels.append(name)
+    fig.legend(handles, labels,
                handler_map={tuple: HandlerTuple(ndivide=1)},
-               loc="upper center", ncol=2, frameon=False, fontsize=10,
+               loc="upper center", ncol=len(labels), frameon=False, fontsize=10,
                bbox_to_anchor=(0.5, y), handlelength=3.0)
 
 
@@ -97,14 +101,20 @@ def fig_single(real, sim, wr, ws, rs, ss, panels, t_end, args):
     """
     Both metrics on one axis. Color = metric (navy largest, orange mean size),
     line style = source. A label at the right edge names each metric and
-    carries the last-N-s numbers.
+    carries the last-N-s numbers; with --no-edge-labels the metrics are named
+    in the legend instead. --aspect sets the figure's width : height.
     """
-    fig, ax = plt.subplots(figsize=(10, 4.8))
+    figsize = (10, 4.8) if args.aspect is None else (4.0 * args.aspect, 4.0)
+    fig, ax = plt.subplots(figsize=figsize)
     n_real = None
     for key, scol, name, _ in panels:
         m, y_sim = draw_pair(ax, real, sim, wr, ws, key)
 
         r, si = steady(rs, scol), steady(ss, scol)
+        if r:
+            n_real = r[2]
+        if args.no_edge_labels:
+            continue
         label = name.replace(" (per robot)", "\n(per robot)")
         if r and si:
             n_real = r[2]
@@ -122,8 +132,10 @@ def fig_single(real, sim, wr, ws, rs, ss, panels, t_end, args):
     ax.set_ylabel("group size (robots)", color=MUTED)
     ax.set_xlabel("time (s)", color=MUTED)
     style_axis(ax)
-    legend(fig, n_real)
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    metrics = [(k, n) for k, _, n, _ in panels] if args.no_edge_labels else None
+    legend(fig, n_real, metrics=metrics)
+    # the same absolute headroom for the legend at any figure height
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.34 / figsize[1]))
     bgp.save_fig(fig, args.out)
     plt.close(fig)
     print(f"-> {os.path.join(os.path.dirname(args.out), bgp.written_name(args.out))}")
@@ -144,6 +156,10 @@ def main():
     ap.add_argument("--layout", choices=("stacked", "single"), default="stacked",
                     help="stacked: one panel per metric; single: both metrics on "
                          "one axis, labelled at the right edge")
+    ap.add_argument("--aspect", type=float, default=None,
+                    help="single layout: figure width / height (default 10 x 4.8 in)")
+    ap.add_argument("--no-edge-labels", action="store_true",
+                    help="single layout: no labels at the right edge; the legend names the metrics")
     args = ap.parse_args()
 
     bgp.OUTPUT_FORMATS = list(args.formats)
