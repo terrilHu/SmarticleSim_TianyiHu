@@ -20,6 +20,7 @@ Usage:
     python batch_group_plots.py "datafile/*"                  # wildcard
     python batch_group_plots.py --dirs-from list.txt          # one experiment dir per line
     python batch_group_plots.py datafile/exp_A --figs composition mean_groupsize
+    python batch_group_plots.py datafile/exp_A --jobs 3     # trials at once; see --help
 
 Output has two tiers. **Per trial** (written back into that trial's folder by
 default):
@@ -139,13 +140,15 @@ group<stamp>.csv with a Time column, here time is computed from Step / fps,
 with fps preferentially read from the experiment directory's
 config_snapshot.json (RENDER_FPS_HEADLESS).
 
-Grouping uses pos_all_grouping.compute_frame_groups -- the same function
-strategy.py's realtime decision-making calls, verified frame-by-frame to
-produce identical groupings (provided max_dist matches).
+Grouping uses pos_all_grouping.frame_group_columns, the array version of the
+compute_frame_groups that strategy.py's realtime decision-making calls. Compared
+with group files that compute_frame_groups wrote, on 30 trials at N=500 (898,260
+frames): same groups, order and members in every frame, provided max_dist matches.
 """
 
 import argparse
 import glob
+import multiprocessing as mp
 import hashlib
 import json
 import math
@@ -164,7 +167,7 @@ import matplotlib.pyplot as plt
 # analysis/ on the path, so the project root has to be added explicitly.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pos_all_grouping import compute_frame_groups
+from pos_all_grouping import frame_group_columns
 
 # Figure labels are always English: usable for both papers and reports, and it
 # avoids a cross-machine Chinese font dependency
@@ -456,56 +459,81 @@ def detect_fps(folder, fallback=60.0):
         return float(fallback), "fallback"
 
 
+GROUP_COLUMNS = ["Step", "group_local_id", "size", "alignment", "centroid_x", "centroid_y", "member_ids"]
+
+
+def write_groups_csv(pos_all_csv, groups_csv, max_dist, include_singletons=True, flush_every=2000):
+    """
+    Compute one trial's group table and write it as it goes, so that memory stays
+    near the size of POS_ALL however many groups there are (6M rows at N=500).
+    Written to .tmp and renamed: a killed run never leaves a partial cache that
+    looks complete.
+    """
+    df = pd.read_csv(pos_all_csv)
+    df.columns = df.columns.str.strip()
+    df = df.sort_values(["Step", "Agent_ID"], kind="mergesort")
+    step_col = df["Step"].to_numpy()
+    xy = df[["X", "Y"]].to_numpy(dtype=float)
+    th = df["Theta"].to_numpy(dtype=float)
+    aid = df["Agent_ID"].to_numpy()
+    del df
+    steps, starts = np.unique(step_col, return_index=True)
+    bounds = np.append(starts, len(step_col))
+    label = {a: str(int(a)) for a in np.unique(aid).tolist()}
+
+    tmp = groups_csv + ".tmp"
+    cols, first = {c: [] for c in GROUP_COLUMNS}, True
+
+    def flush():
+        nonlocal cols, first
+        # A large buffer: the default's many small writes took 6x as long on the
+        # external exFAT disk this data lives on (14.6 s vs 2.4 s for 46 MB)
+        with open(tmp, "w" if first else "a", newline="", encoding="utf-8", buffering=16 * 2**20) as f:
+            pd.DataFrame({c: (np.concatenate(v) if v and c != "member_ids" else v)
+                          for c, v in cols.items()}, columns=GROUP_COLUMNS).to_csv(f, index=False, header=first)
+        cols, first = {c: [] for c in GROUP_COLUMNS}, False
+
+    for k, step in enumerate(steps):
+        sl = slice(bounds[k], bounds[k + 1])
+        r = frame_group_columns(xy[sl], th[sl], aid[sl], max_dist, include_singletons)
+        if r is not None and len(r[0]):
+            size, alignment, cx, cy, members, offsets = r
+            cols["Step"].append(np.full(len(size), int(step)))
+            cols["group_local_id"].append(np.arange(len(size)))
+            cols["size"].append(size)
+            cols["alignment"].append(alignment)
+            cols["centroid_x"].append(cx)
+            cols["centroid_y"].append(cy)
+            text = [label[a] for a in members.tolist()]
+            cols["member_ids"].extend(" ".join(text[a:b]) for a, b in zip(offsets[:-1].tolist(), offsets[1:].tolist()))
+        if (k + 1) % flush_every == 0 and cols["Step"]:
+            flush()
+    if cols["Step"] or first:
+        flush()
+    os.replace(tmp, groups_csv)
+
+
+def group_cache_path(pos_all_csv, max_dist, include_singletons=True):
+    tag = f"{max_dist:g}".replace(".", "p")
+    cache = pos_all_csv.replace("_POS_ALL.csv", f"_groups_d{tag}.csv")
+    return cache if include_singletons else cache.replace(".csv", "_nosing.csv")
+
+
 def group_table(pos_all_csv, max_dist, include_singletons=True, force=False):
     """
     One row per group per frame, columns matching
     pos_all_grouping.process_pos_all_groups.
 
     Results are cached alongside the source as <prefix>_groups_d<max_dist>.csv.
-    The computation itself calls compute_frame_groups; the only change from
-    process_pos_all_groups is replacing its "rescan the whole table every
-    frame" (O(frames^2)) with a sort-then-slice -- the grouping logic itself is
-    untouched.
     """
-    tag = f"{max_dist:g}".replace(".", "p")
-    cache = pos_all_csv.replace("_POS_ALL.csv", f"_groups_d{tag}.csv")
-    if not include_singletons:
-        cache = cache.replace(".csv", "_nosing.csv")
-    if os.path.isfile(cache) and not force:
-        # member_ids must stay text: in a trial where every group is a
-        # singleton every cell holds a single number, pandas infers float64,
-        # and the ids come back as "1.0" -- which int() then refuses.
-        return pd.read_csv(cache, dtype={"member_ids": str}), cache, True
-
-    df = pd.read_csv(pos_all_csv)
-    df.columns = df.columns.str.strip()
-    df = df.sort_values(["Step", "Agent_ID"], kind="mergesort")
-
-    step_col = df["Step"].to_numpy()
-    xy = df[["X", "Y"]].to_numpy(dtype=float)
-    th = df["Theta"].to_numpy(dtype=float)
-    aid = df["Agent_ID"].to_numpy()
-
-    steps, starts = np.unique(step_col, return_index=True)
-    bounds = np.append(starts, len(step_col))
-
-    rows = []
-    for k, step in enumerate(steps):
-        sl = slice(bounds[k], bounds[k + 1])
-        for gi, g in enumerate(compute_frame_groups(
-                xy[sl], th[sl], aid[sl], max_dist, include_singletons)):
-            rows.append({
-                "Step": int(step),
-                "group_local_id": gi,
-                "size": g["size"],
-                "alignment": g["alignment"],
-                "centroid_x": g["centroid"][0],
-                "centroid_y": g["centroid"][1],
-                "member_ids": " ".join(str(int(a)) for a in g["agent_ids"]),
-            })
-    out = pd.DataFrame(rows)
-    out.to_csv(cache, index=False)
-    return out, cache, False
+    cache = group_cache_path(pos_all_csv, max_dist, include_singletons)
+    cached = os.path.isfile(cache) and not force
+    if not cached:
+        write_groups_csv(pos_all_csv, cache, max_dist, include_singletons)
+    # member_ids must stay text: in a trial where every group is a
+    # singleton every cell holds a single number, pandas infers float64,
+    # and the ids come back as "1.0" -- which int() then refuses.
+    return pd.read_csv(cache, dtype={"member_ids": str}), cache, cached
 
 
 # =============================================================================
@@ -860,14 +888,21 @@ def track_groups(frames, min_size=2, min_jaccard=0.3):
     out = []
     for _step, _sec, groups in frames:
         cur = [g["members"] for g in groups if g["size"] >= min_size]
+        # Groups in a frame are disjoint, so each robot names the one previous
+        # group it can overlap, and only those pairs need scoring. Same pairs as
+        # trying every combination, which cost 40 s per trial at N=500.
+        owner = {r: gid for gid, pm in prev.items() for r in pm}
         pairs = []
-        for gid, pm in prev.items():
-            for ci, m in enumerate(cur):
-                inter = len(pm & m)
-                if inter:
-                    j = inter / len(pm | m)
-                    if j >= min_jaccard:
-                        pairs.append((-j, -inter, gid, ci))
+        for ci, m in enumerate(cur):
+            shared = {}
+            for r in m:
+                gid = owner.get(r)
+                if gid is not None:
+                    shared[gid] = shared.get(gid, 0) + 1
+            for gid, inter in shared.items():
+                j = inter / (len(prev[gid]) + len(m) - inter)
+                if j >= min_jaccard:
+                    pairs.append((-j, -inter, gid, ci))
         pairs.sort()
         used_g, used_c, now = set(), set(), {}
         for _j, _i, gid, ci in pairs:
@@ -888,29 +923,29 @@ def track_groups(frames, min_size=2, min_jaccard=0.3):
 # Per-trial time series (consumed by both plotting and cross-trial averaging)
 # =============================================================================
 
-def trial_series(frames, bins):
-    """Collapse the per-frame grouping results into a handful of equal-length time series."""
-    m = len(frames)
-    secs = np.array([f[1] for f in frames], dtype=float)
-    frac = np.zeros((m, len(bins)))
-    largest = np.empty(m); mean_sz = np.empty(m); align = np.empty(m)
-    n_all = np.empty(m); n_multi = np.empty(m); n_seen = np.empty(m)
+def trial_series(gdf, bins, fps):
+    """Collapse a group table into a handful of equal-length time series."""
+    uniq, frame = np.unique(gdf["Step"].to_numpy(), return_inverse=True)
+    m = len(uniq)
+    secs = uniq.astype(float) / fps
+    size = gdf["size"].to_numpy(dtype=float)
+    per_frame = lambda w: np.bincount(frame, w, m)
 
-    for i, (_s, _t, groups) in enumerate(frames):
-        sizes = [g["size"] for g in groups]
-        total = sum(sizes)
-        for g in groups:
-            for b, (lo, hi) in enumerate(bins):
-                if lo <= g["size"] <= hi:
-                    frac[i, b] += g["size"] / max(total, 1)
-                    break
-        largest[i] = max(sizes)
-        # Robot's-eye-view mean group size: grab a random robot, how big is its group
-        mean_sz[i] = sum(s * s for s in sizes) / max(total, 1)
-        align[i] = sum(g["size"] * g["alignment"] for g in groups) / max(total, 1)
-        n_all[i] = len(groups)
-        n_multi[i] = sum(1 for s in sizes if s >= 2)
-        n_seen[i] = total
+    n_seen = per_frame(size)
+    total = np.maximum(n_seen, 1)
+    frac = np.zeros((m, len(bins)))
+    left = np.ones(len(size), dtype=bool)
+    for b, (lo, hi) in enumerate(bins):        # each group counts in the first bin that holds it
+        hit = left & (size >= lo) & (size <= hi)
+        frac[:, b] = np.bincount(frame[hit], size[hit], m) / total
+        left &= ~hit
+    largest = np.zeros(m)
+    np.maximum.at(largest, frame, size)
+    # Robot's-eye-view mean group size: grab a random robot, how big is its group
+    mean_sz = per_frame(size * size) / total
+    align = per_frame(size * gdf["alignment"].to_numpy(dtype=float)) / total
+    n_all = np.bincount(frame, minlength=m).astype(float)
+    n_multi = np.bincount(frame[size >= 2], minlength=m).astype(float)
 
     return {"secs": secs, "frac": frac, "largest": largest, "mean_size": mean_sz,
             "alignment": align, "n_groups": n_all, "n_multi": n_multi,
@@ -1117,15 +1152,21 @@ def fig_kymograph(frames, tracked, path, min_life=6, title=""):
     # exist for just a frame or two before dispersing all get a single
     # neutral light purple, otherwise hundreds of transient groups would each
     # claim their own colour and the plot would turn into coloured noise.
-    life = {g: int((M == g).any(axis=0).sum()) for g in np.unique(M) if g >= 0}
-    stable = sorted([g for g, n in life.items() if n >= min_life])
+    # life[g + 1] = frames group g appears in: distinct values per column, tallied.
+    # Colours go through a lookup table: testing the whole matrix once per group
+    # took 400 s per trial at N=500.
+    ordered = np.sort(M, axis=0)
+    first = np.ones(M.shape, dtype=bool)
+    first[1:] = ordered[1:] != ordered[:-1]
+    life = np.bincount(ordered[first] + 1, minlength=int(M.max()) + 2)
+    stable = np.flatnonzero((life[1:] > 0) & (life[1:] >= min_life))
     cmap = plt.get_cmap("tab20")
-    color = {g: cmap(i % 20) for i, g in enumerate(stable)}
-    rgb = np.ones(M.shape + (3,))
-    rgb[M >= 0] = (0.72, 0.72, 0.78)         # briefly grouped
-    for g, c in color.items():
-        rgb[M == g] = c[:3]
-    rgb[M < 0] = (0.95, 0.95, 0.95)          # alone
+    lut = np.empty((len(life), 3))
+    lut[0] = (0.95, 0.95, 0.95)              # alone
+    lut[1:] = (0.72, 0.72, 0.78)             # briefly grouped
+    for i, g in enumerate(stable):
+        lut[g + 1] = cmap(i % 20)[:3]
+    rgb = lut[M + 1]
 
     # With many robots, per-row labels would blur together, so use sparse ticks
     step = max(1, len(ids) // 40)
@@ -1820,30 +1861,31 @@ def process_trial(folder, exp_name, bins, labels, args, fps, geom=None):
     pos_all = find_pos_all(folder)
     name = os.path.basename(os.path.normpath(folder))
 
-    gdf, cache, cached = group_table(pos_all, args.max_dist,
-                                     not args.no_singletons, args.force)
-    if gdf.empty:
-        print(f"    [skip] {name}: group table is empty")
-        return None
+    cache = group_cache_path(pos_all, args.max_dist, not args.no_singletons)
+    cached = os.path.isfile(cache) and not args.force
+    if not cached:
+        write_groups_csv(pos_all, cache, args.max_dist, not args.no_singletons)
 
-    # frames is the expensive intermediate (1.1M group rows -> Python dicts), and
-    # only two figures actually need it; everything else consumes the time series
-    # derived from it. So cache the series and build frames only when the cache
-    # misses or when those two figures are asked for. Without this, selecting any
-    # figure at all -- even an experiment-level one, even radial, which never
-    # looks at frames -- paid the full reconstruction for every trial.
+    # The table and the frames built from it (6M rows -> Python dicts at N=500,
+    # several GB) are read only for what needs them. Most figures use the time
+    # series, which needs two columns once and then comes from its own cache.
     need_frames = bool({"kymograph", "snapshots"} & args.figs)
+    need_table = need_frames or bool({"radial", "chains"} & args.figs and geom is not None)
     spath = series_cache_path(pos_all, args.max_dist,
                               not args.no_singletons, bins)
     sr = None if args.force else read_series_cache(spath)
     series_cached = sr is not None
 
-    frames = None
-    if sr is None or need_frames:
-        frames = load_frames(gdf, fps, with_members=need_frames)
+    gdf = pd.read_csv(cache, dtype={"member_ids": str}) if need_table else None
     if sr is None:
-        sr = trial_series(frames, bins)
+        t = gdf if gdf is not None else pd.read_csv(cache, usecols=["Step", "size", "alignment"])
+        if t.empty:
+            print(f"    [skip] {name}: group table is empty")
+            return None
+        sr = trial_series(t, bins, fps)
         write_series_cache(spath, sr)
+        del t
+    frames = load_frames(gdf, fps, with_members=True) if need_frames else None
 
     # Gait-pattern shares, sampled on the same time axis as everything else so
     # they can be averaged across trials alongside the rest
@@ -1925,6 +1967,24 @@ STEADY_COLS = ("largest_mean", "largest_steady", "largest_peak",
                "largest_frac_steady", "alignment_steady")
 
 
+def _init_worker(formats, font):
+    global OUTPUT_FORMATS
+    OUTPUT_FORMATS = formats
+    choose_font(font)
+
+
+def _process_trial_job(job):
+    return process_trial(*job)
+
+
+def trial_jobs(args, n_trials):
+    """Figures that hold the whole group table in memory take about 4 GB per trial; the rest about 1 GB."""
+    if args.jobs:
+        return min(args.jobs, n_trials)
+    heavy = {"kymograph", "snapshots", "radial", "chains"} & args.figs
+    return min(2 if heavy else 5, n_trials)
+
+
 def process_experiment(exp_dir, args, radial_sink=None, chain_sink=None):
     exp_name = os.path.basename(os.path.normpath(exp_dir))
     trials = find_trials(exp_dir)
@@ -1970,8 +2030,14 @@ def process_experiment(exp_dir, args, radial_sink=None, chain_sink=None):
     bins, labels = size_bins(n_max)
 
     all_sr, all_stats = [], []
-    for t in trials:
-        r = process_trial(t, exp_name, bins, labels, args, fps, geom)
+    jobs = [(t, exp_name, bins, labels, args, fps, geom) for t in trials]
+    n_jobs = trial_jobs(args, len(trials))
+    if n_jobs > 1:
+        with mp.Pool(n_jobs, _init_worker, (OUTPUT_FORMATS, args.font)) as pool:
+            results = pool.map(_process_trial_job, jobs, chunksize=1)   # results stay in trial order
+    else:
+        results = map(_process_trial_job, jobs)
+    for r in results:
         if r:
             all_sr.append(r[0])
             all_stats.append(r[1])
@@ -2156,6 +2222,10 @@ def main():
                     help="Experiment directories (each containing trial_XXXX/ subfolders); wildcards allowed")
     ap.add_argument("--dirs-from", default=None,
                     help="Read the list of experiment directories from a file, one per line (lines starting with # are comments)")
+    ap.add_argument("--jobs", type=int, default=0,
+                    help="Trials of one experiment to process at once (default: 2 if kymograph, "
+                         "snapshots, radial or chains are asked for, because each trial then "
+                         "holds about 4 GB; otherwise 5, at about 1 GB each)")
     ap.add_argument("--max-dist", type=float, default=65.0,
                     help="Voronoi adjacency distance threshold, in pixels (default 65)")
     ap.add_argument("--no-singletons", action="store_true",

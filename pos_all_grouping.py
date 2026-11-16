@@ -35,6 +35,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
+from scipy.spatial import Delaunay, cKDTree
 
 # Reuse the original, unmodified routines.
 from pos_all_alignment import voronoi_adjacency, single_alignment
@@ -102,6 +103,80 @@ def compute_frame_groups(positions: np.ndarray,
                          float(np.mean(positions[comp, 1]))),
         })
     return groups
+
+
+_KDTREE_MIN_ROBOTS = 50
+
+
+def frame_group_columns(positions: np.ndarray,
+                        thetas: np.ndarray,
+                        agent_ids: np.ndarray,
+                        max_dist: float,
+                        include_singletons: bool = True):
+    """
+    The same grouping as compute_frame_groups, as arrays instead of one dict per
+    group, for code that runs over every frame of a trial. At N=500 a frame has
+    about 200 groups, and the per-group numpy calls were most of the run time.
+
+    Same groups, same group order (by lowest row), same member order. size and
+    the members are identical; alignment and centroid are summed in a different
+    order, so they can differ from compute_frame_groups in the last few bits.
+
+    Returns (size, alignment, cx, cy, members, offsets), or None if no robot is
+    valid. Group k's Agent_IDs are members[offsets[k]:offsets[k + 1]].
+
+    From _KDTREE_MIN_ROBOTS up this does not triangulate, because the components
+    do not depend on it. Delaunay edges <= max_dist are a subset of all pairs
+    <= max_dist, so their components can only be finer; and any two robots joined
+    by pairs <= max_dist are also joined by minimum-spanning-tree edges <= max_dist,
+    which are Delaunay edges. So both graphs have the same components, and listing
+    near pairs costs a tenth of a triangulation (which on Windows also creates and
+    deletes a temp file every frame, for qhull's messages). Fewer robots go through
+    Delaunay as before: there it can fail outright (under 3 robots, or all in a
+    line), which voronoi_adjacency treats as no edges at all.
+    """
+    positions = np.asarray(positions, dtype=float)
+    thetas = np.asarray(thetas, dtype=float)
+    agent_ids = np.asarray(agent_ids)
+    valid = np.isfinite(positions).all(axis=1)
+    if not valid.all():
+        positions, thetas, agent_ids = positions[valid], thetas[valid], agent_ids[valid]
+    m = len(positions)
+    if m == 0:
+        return None
+
+    ii = jj = np.empty(0, dtype=np.int32)
+    if m >= _KDTREE_MIN_ROBOTS:
+        # a hair wider, so that the test below alone decides pairs right at max_dist
+        ii, jj = cKDTree(positions).query_pairs(max_dist * (1 + 1e-9), output_type="ndarray").T
+    elif m >= 2:
+        try:
+            s = Delaunay(positions).simplices
+            # every triangle side; a shared side appears twice, which the graph doesn't mind
+            ii = np.concatenate((s[:, 0], s[:, 1], s[:, 0]))
+            jj = np.concatenate((s[:, 1], s[:, 2], s[:, 2]))
+        except Exception:
+            pass                     # as voronoi_adjacency: no triangulation, no edges
+    d = positions[ii] - positions[jj]
+    near = np.sqrt(d[:, 0] ** 2 + d[:, 1] ** 2) <= max_dist
+    ii, jj = ii[near], jj[near]
+    n, labels = connected_components(
+        csr_matrix((np.ones(len(ii), dtype=bool), (ii, jj)), shape=(m, m)), directed=False)
+
+    size = np.bincount(labels, minlength=n)
+    v = np.bincount(labels, np.cos(2 * thetas), n) + 1j * np.bincount(labels, np.sin(2 * thetas), n)
+    alignment = np.abs(v) / size
+    cx = np.bincount(labels, positions[:, 0], n) / size
+    cy = np.bincount(labels, positions[:, 1], n) / size
+    order = np.argsort(labels, kind="stable")
+    members = agent_ids[order]
+    offsets = np.concatenate(([0], np.cumsum(size)))
+    if not include_singletons:
+        keep = size > 1
+        members = members[np.repeat(keep, size)]
+        size, alignment, cx, cy = size[keep], alignment[keep], cx[keep], cy[keep]
+        offsets = np.concatenate(([0], np.cumsum(size)))
+    return size, alignment, cx, cy, members, offsets
 
 
 def process_pos_all_groups(csv_path: str,

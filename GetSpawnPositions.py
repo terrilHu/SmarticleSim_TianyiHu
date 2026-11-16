@@ -251,8 +251,12 @@ def read_condition(path):
     reads exactly what simulation.py would.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from config import _load_override_file
+    from config import _load_override_file, _resolve_init_file_rel
     settings, _meta = _load_override_file(path)
+    # INIT_FILE_REL is relative to the condition file; resolve it the same way
+    # config.py does in the worker so the plan names the file actually written
+    if settings.get("INIT_FILE_REL"):
+        settings["INIT_FILE"] = _resolve_init_file_rel(settings["INIT_FILE_REL"], path)
     return settings, os.path.splitext(os.path.basename(path))[0]
 
 

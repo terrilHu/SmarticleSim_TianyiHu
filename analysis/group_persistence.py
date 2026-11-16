@@ -32,7 +32,11 @@ vote as group_lifetimes.py's hysteresis).
 
     python group_persistence.py <sweep_root> [--jobs 10]
 
-Writes <sweep_root>/_persistence_per_trial.csv and _persistence_curves.npz.
+Writes <sweep_root>/_persistence_per_trial.csv and _persistence_curves.npz
+(origins t >= 200 s), or *_t0_<T0>.csv / .npz with --t0 for any other cut;
+--t0 0 uses every origin in the run, initial transient included.
+--only P [P ...] recomputes just those patterns (e.g. after re-running them) and replaces
+their rows and curves in the existing csv / npz; every other pattern is kept as it was.
 """
 
 import argparse
@@ -56,9 +60,15 @@ FPS, MAXD = 60.0, 65.0
 SAMPLE_HZ = 6.0
 BLOCK_S = 2.0
 MIN_SIZE = 3
-T0_S = 200.0             # origins t >= T0_S
+T0_S = 200.0             # origins t >= T0_S (default; --t0 overrides)
+
+
+def out_suffix(t0):
+    """File suffix for an origin cut: none for the original 200 s, so the
+    files that already exist keep their names."""
+    return "" if t0 == T0_S else f"_t0_{t0:g}"
 MAX_LAG_S = 120.0
-FIXED_LAGS_S = (10, 30, 60, 120)
+FIXED_LAGS_S = (10, 30, 50, 60, 120)
 
 
 def sampled_labels(trial_dir):
@@ -159,10 +169,10 @@ def summarize_curve(lags, q):
 
 
 def run_trial(job):
-    pattern, trial_dir = job
+    pattern, trial_dir, t0 = job
     t, C = block_comembership(*sampled_labels(trial_dir))
-    lags, q, pair, _, _ = overlap_curve(t, C)
-    o0 = np.searchsorted(t, T0_S)
+    lags, q, pair, _, _ = overlap_curve(t, C, t0=t0)
+    o0 = np.searchsorted(t, t0)
     row = dict(pattern=pattern, trial_id=int(os.path.basename(trial_dir).split("_")[1]),
                frac_grouped=C[o0:].any(2).mean(), **summarize_curve(lags, q),
                pair_q_30s=pair[int(round(30 / BLOCK_S))])
@@ -173,12 +183,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("root")
     ap.add_argument("--jobs", type=int, default=10)
+    ap.add_argument("--t0", type=float, default=T0_S,
+                    help="earliest time origin, s (default %(default)g; 0 = whole run)")
+    ap.add_argument("--only", nargs="+", default=None, metavar="PATTERN",
+                    help="recompute only these patterns and merge them into the existing outputs")
     args = ap.parse_args()
 
     jobs = []
     for exp in sorted(glob.glob(os.path.join(args.root, "a[0-9]*"))):
-        if os.path.isdir(exp):
-            jobs += [(os.path.basename(exp), d) for d in sorted(glob.glob(os.path.join(exp, "trial_*")))]
+        if os.path.isdir(exp) and (args.only is None or os.path.basename(exp) in args.only):
+            jobs += [(os.path.basename(exp), d, args.t0) for d in sorted(glob.glob(os.path.join(exp, "trial_*")))]
     with Pool(args.jobs) as p:
         res = p.map(run_trial, jobs, chunksize=1)
 
@@ -186,9 +200,25 @@ def main():
     ic = pd.concat([pd.read_csv(os.path.join(args.root, f"{p}_summary.csv"), usecols=["trial_id", "ic_idx"])
                     .assign(pattern=p) for p in rows.pattern.unique()])
     rows = rows.merge(ic, on=["pattern", "trial_id"], how="left")
-    rows.to_csv(os.path.join(args.root, "_persistence_per_trial.csv"), index=False)
-    np.savez(os.path.join(args.root, "_persistence_curves.npz"), lags=res[0][1],
-             q=np.array([r[2] for r in res]), pair=np.array([r[3] for r in res]),
+    sfx = out_suffix(args.t0)
+    rows["t0_s"] = args.t0
+    csv_path = os.path.join(args.root, f"_persistence_per_trial{sfx}.csv")
+    npz_path = os.path.join(args.root, f"_persistence_curves{sfx}.npz")
+    q, pair = np.array([r[2] for r in res]), np.array([r[3] for r in res])
+    if args.only is not None:
+        # keep every other pattern's rows and curves; replace these, in the same row order
+        old = pd.read_csv(csv_path)
+        with np.load(npz_path, allow_pickle=True) as z:
+            if not np.allclose(z["lags"], res[0][1]):
+                raise SystemExit(f"{npz_path}: lags differ from this run; recompute everything")
+            keep = ~np.isin(z["pattern"], args.only)
+            q = np.concatenate([z["q"][keep], q])
+            pair = np.concatenate([z["pair"][keep], pair])
+        rows = pd.concat([old[~old.pattern.isin(args.only)], rows[old.columns]], ignore_index=True)
+        order = rows.sort_values(["pattern", "trial_id"], kind="mergesort").index.to_numpy()
+        rows, q, pair = rows.loc[order].reset_index(drop=True), q[order], pair[order]
+    rows.to_csv(csv_path, index=False)
+    np.savez(npz_path, lags=res[0][1], q=q, pair=pair,
              pattern=rows.pattern.to_numpy(), trial_id=rows.trial_id.to_numpy())
     print(rows.groupby("pattern").agg(["mean", "std"]).round(3).to_string())
 

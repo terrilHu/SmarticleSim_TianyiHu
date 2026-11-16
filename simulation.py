@@ -81,8 +81,11 @@ def print_progress_bar(iteration, total, start_time, bar_length=30):
 
 
 def should_record_trial(trial_id: int) -> bool:
-    if not RECORD_VIDEO:
-        return False
+    return bool(RECORD_VIDEO) and _policy_selects_trial(trial_id)
+
+
+def _policy_selects_trial(trial_id: int) -> bool:
+    """RECORD_POLICY's choice of trials, shared by videos and snapshots."""
     pol      = (RECORD_POLICY or "").lower()
     do_mod   = ("mod"   in pol) and RECORD_EVERY_K and (trial_id % RECORD_EVERY_K == 0)
     do_first = ("first" in pol) and RECORD_FIRST_N and (trial_id <= RECORD_FIRST_N)
@@ -221,6 +224,30 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
                     movable=RING_MOVABLE, shape=RING_SHAPE, n_sides=RING_N_SIDES,
                     color_bands=RING_COLOR_BANDS)
 
+
+    # Render state is cheap next to the physics and is what lets a video be
+    # redrawn later with different styling, or at all, without re-running the
+    # trial. Off only if a config explicitly says so.
+    save_render_state = bool(getattr(cfg, "SAVE_RENDER_STATE", True))
+    legacy_pair_metrics = bool(getattr(cfg, "LEGACY_PAIR_METRICS", False))
+
+    def _ring_vertices():
+        """
+        Current ring outline as a list of (x, y).
+
+        One vertex per edge taken from each segment's first endpoint, mapped to
+        world coordinates: the loop is closed, so n endpoints describe it, and
+        for a movable ring each edge is its own body whose position has to be
+        read every frame. A static ring never moves, but it costs the same to
+        store and keeps the file one shape.
+        """
+        segs = getattr(ring, "segments", None) or []
+        out = []
+        for sg in segs:
+            b = sg.body
+            out.append(tuple(b.local_to_world(sg.a)) if b is not None
+                       else tuple(sg.a))
+        return out
     # Effective interior radius used for live spawning: a polygon's edges sit
     # inward of the circumscribed circle, so spawn within the inscribed radius
     # (apothem) to keep robots inside the n-gon.  Circle → unchanged INNER_R.
@@ -356,6 +383,22 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
         video_path    = os.path.join(video_dir, f"trial_{trial_id:04d}.mp4")
         recorder_orig = VideoRecorder(video_path, W, H, 30)
 
+    def _draw_frame():
+        orig_surf.fill((255, 255, 255))
+        space.debug_draw(draw_options_orig)
+        _blit_phase_markers(orig_surf)
+        _blit_id_labels(orig_surf)
+
+    # Snapshots: see SNAPSHOT_DIVISIONS in config.py.
+    snap_n = max(0, int(getattr(cfg, "SNAPSHOT_DIVISIONS", 0) or 0))
+    if not _policy_selects_trial(trial_id):
+        snap_n = 0
+    snap_dir = os.path.join(video_dir, f"trial_{trial_id:04d}_snapshots")
+    snap_k   = 0        # next division point to capture
+    snap_t0  = None     # time of the first recorded frame; set in the loop
+    if snap_n:
+        os.makedirs(snap_dir, exist_ok=True)
+
     # ── Data containers ───────────────────────────────────────────────────────
     ORDs, ORDs_abs, ORD_diffs, ORD_diffs_abs = [], [], [], []
     Mdist, GRs, ROT_ORDS, IMPACTS, POS_ALL   = [], [], [], [], []
@@ -366,6 +409,13 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
     t          = 0.0
     dt         = 1.0 / 180.0
     frame_i    = 0
+    # Everything a renderer needs that nothing else records: the arm angles
+    # (POS_ALL carries only the body pose) and the ring outline (it is movable,
+    # so the swarm pushes it out of shape and its geometry cannot be recovered
+    # from the config). Collected only on the frames a video would encode, so
+    # the cost follows the video rather than the physics.
+    RENDER_ARMS = []
+    RENDER_RING = []
     poll_i     = 0     # frame boundaries seen, for RUNTIME_GAIT_POLL_EVERY
     # MAX_RUNTIME = 45.0
     W_WALL     = 2.0
@@ -491,62 +541,76 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
         if not warmup_active:
             positions = [s.main_body.position for s in smarticles]
             psis      = [s.main_body.angle    for s in smarticles]
-            rot_ord   = rotation_order_parameters(psis, positions, center)
 
             for _i, _p in enumerate(positions):
                 px_buf[_i] = _p.x
                 py_buf[_i] = _p.y
             psi_buf[:] = psis
 
-            # ── Wall coupling (was the outer half of the pair loop) ─────────
-            # float_power (not **2) to match pymunk's Vec2d.length, which is
-            # math.sqrt(x**2 + y**2) on Python floats -- see analysis.py.
-            _rw   = np.sqrt(np.float_power(px_buf - cx_c, 2.0)
-                            + np.float_power(py_buf - cy_c, 2.0))
-            _dgap = INNER_R - _rw
-            A_wall[:] = K_WALL * sigmoid((Ls_i - _dgap) / (Ls_i + 1e-9))
-
-            _dx0   = px_buf - ipx
-            _dy0   = py_buf - ipy
-            mdists = np.float_power(_dx0, 2.0) + np.float_power(_dy0, 2.0)
-
-            # ── Pair coupling: same formula, evaluated in NumPy ─────────────
-            (dx_matrix, dy_matrix, dPsi_matrix,
-             dxy_matrix, Aij_matrix) = build_pair_matrices(
-                px_buf, py_buf, psi_buf, acts0_i, acts1_i,
-                Ls_i, Lw_i, Smain_i, a0, a1, g0, WC)
-
-            IMPACT = Aij_matrix.sum(axis=1) / (n - 1) + W_WALL * A_wall
-            IMPACTS.append(IMPACT)
-            _, gr = compute_gr(dxy_matrix)
-            GRs.append(gr)
             # Same values as the previous list-of-tuples comprehension
             # (wrap_pi is elementwise, float32 cast is unchanged).
             _wpsi = wrap_pi(psi_buf)
             POS_ALL.append(
                 np.stack((px_buf, py_buf, _wpsi), axis=1).astype(np.float32))
 
-            psis_arr = _wpsi
-            sys_ord, sys_ord_abs = calculate_orientational_order(psis_arr)
-            # calculate_orientational_order(row) == (|mean(exp(1j*row))|,
-            # |mean(exp(2j*row))|).  numpy's elementwise exp is chunk-invariant
-            # (verified: exp(1j*M)[i] is bit-identical to exp(1j*M[i]) ), so the
-            # two exponentials are hoisted to a single whole-matrix call.  The
-            # per-row np.mean and the sequential accumulation below are kept
-            # exactly as they were -- reductions are NOT chunk-invariant.
-            _E1 = np.exp(1j * dPsi_matrix)
-            _E2 = np.exp(1j * 2.0 * dPsi_matrix)
-            sys_diff = sys_diff_abs = 0.0
-            for i in range(n):
-                sys_diff       += np.abs(np.mean(_E1[i]))
-                sys_diff_abs   += np.abs(np.mean(_E2[i]))
-            sys_diff     /= (n - 1)
-            sys_diff_abs /= (n - 1)
+            # ── Legacy pair-coupling metrics ────────────────────────────────
+            # Everything below feeds only IMPACTS / GRs / ORDs / ORD_diffs /
+            # Mdist / ROT_ORDS, i.e. _impacts.csv, _GRs.npz and
+            # _GRs_ORDs_Mdist.csv -- see LEGACY_PAIR_METRICS in config.py for
+            # why that is off by default.  Kept verbatim (float_power, the
+            # hoisted exponentials, the sequential per-row accumulation) so
+            # that turning the flag on still reproduces the old numbers
+            # element-for-element.  POS_ALL above is deliberately outside the
+            # guard: it is what every live analysis script reads.
+            if legacy_pair_metrics:
+                rot_ord = rotation_order_parameters(psis, positions, center)
 
-            Mdist.append(np.sqrt(np.mean(mdists)))
-            ORDs.append(sys_ord);       ORDs_abs.append(sys_ord_abs)
-            ORD_diffs.append(sys_diff); ORD_diffs_abs.append(sys_diff_abs)
-            ROT_ORDS.append(rot_ord)
+                # ── Wall coupling (was the outer half of the pair loop) ─────
+                # float_power (not **2) to match pymunk's Vec2d.length, which
+                # is math.sqrt(x**2 + y**2) on Python floats -- see analysis.py
+                _rw   = np.sqrt(np.float_power(px_buf - cx_c, 2.0)
+                                + np.float_power(py_buf - cy_c, 2.0))
+                _dgap = INNER_R - _rw
+                A_wall[:] = K_WALL * sigmoid((Ls_i - _dgap) / (Ls_i + 1e-9))
+
+                _dx0   = px_buf - ipx
+                _dy0   = py_buf - ipy
+                mdists = np.float_power(_dx0, 2.0) + np.float_power(_dy0, 2.0)
+
+                # ── Pair coupling: same formula, evaluated in NumPy ─────────
+                (dx_matrix, dy_matrix, dPsi_matrix,
+                 dxy_matrix, Aij_matrix) = build_pair_matrices(
+                    px_buf, py_buf, psi_buf, acts0_i, acts1_i,
+                    Ls_i, Lw_i, Smain_i, a0, a1, g0, WC)
+
+                IMPACT = Aij_matrix.sum(axis=1) / (n - 1) + W_WALL * A_wall
+                IMPACTS.append(IMPACT)
+                _, gr = compute_gr(dxy_matrix)
+                GRs.append(gr)
+
+                psis_arr = _wpsi
+                sys_ord, sys_ord_abs = calculate_orientational_order(psis_arr)
+                # calculate_orientational_order(row) == (|mean(exp(1j*row))|,
+                # |mean(exp(2j*row))|).  numpy's elementwise exp is chunk-
+                # invariant (verified: exp(1j*M)[i] is bit-identical to
+                # exp(1j*M[i]) ), so the two exponentials are hoisted to a
+                # single whole-matrix call.  The per-row np.mean and the
+                # sequential accumulation below are kept exactly as they were
+                # -- reductions are NOT chunk-invariant.
+                _E1 = np.exp(1j * dPsi_matrix)
+                _E2 = np.exp(1j * 2.0 * dPsi_matrix)
+                sys_diff = sys_diff_abs = 0.0
+                for i in range(n):
+                    sys_diff       += np.abs(np.mean(_E1[i]))
+                    sys_diff_abs   += np.abs(np.mean(_E2[i]))
+                sys_diff     /= (n - 1)
+                sys_diff_abs /= (n - 1)
+
+                Mdist.append(np.sqrt(np.mean(mdists)))
+                ORDs.append(sys_ord);       ORDs_abs.append(sys_ord_abs)
+                ORD_diffs.append(sys_diff); ORD_diffs_abs.append(sys_diff_abs)
+                ROT_ORDS.append(rot_ord)
+
             time_hist.append(t)
 
             # Sweep-coverage k.  Strided because it is the one metric whose cost
@@ -559,12 +623,31 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
             # Only frames that are actually encoded need to be drawn.  The
             # previous code rendered every frame and then threw away
             # (VIDEO_STRIDE - 1) of them; the resulting video is identical.
+            if frame_i % _vstride == 0 and save_render_state:
+                RENDER_ARMS.append([
+                    (ss.left_body.angle - ss.main_body.angle,
+                     ss.right_body.angle - ss.main_body.angle)
+                    for ss in smarticles])
+                RENDER_RING.append(_ring_vertices())
+
             if record_this and frame_i % _vstride == 0:
-                orig_surf.fill((255, 255, 255))
-                space.debug_draw(draw_options_orig)
-                _blit_phase_markers(orig_surf)
-                _blit_id_labels(orig_surf)
+                _draw_frame()
                 recorder_orig.add_frame_from_surface(orig_surf)
+
+            # Not tied to VIDEO_STRIDE: every recorded frame is a candidate, and
+            # the half-frame tolerance picks the one nearest each target (it
+            # also keeps the last target reachable despite float rounding).
+            if snap_n:
+                if snap_t0 is None:
+                    snap_t0 = t
+                _half_frame = 0.5 * steps_per_frame * dt
+                while (snap_k <= snap_n and t >= snap_t0
+                       + snap_k * (MAX_RUNTIME - snap_t0) / snap_n - _half_frame):
+                    _draw_frame()
+                    pygame.image.save(orig_surf, os.path.join(
+                        snap_dir,
+                        f"snapshot_{snap_k:03d}of{snap_n:03d}_t{t:.2f}s.png"))
+                    snap_k += 1
             frame_i += 1
 
         # ── Runtime gait control ──────────────────────────────────────────────
@@ -704,6 +787,21 @@ def run_trial(trial_id, seed, preview, video_dir, out_dir,
                                 for t, rid, cmd in rows))
     except Exception as e:
         print(f"[WARN] gait log write failed: {type(e).__name__}: {e}")
+
+    # Render state: float32 is ample for pixel coordinates (the largest arena
+    # is ~6900 px and float32 carries 7 significant digits) and halves the file
+    # against float64. npz rather than csv because this is read by a renderer,
+    # never by eye, and the text form would be 3-4x larger.
+    if save_render_state and RENDER_ARMS:
+        try:
+            np.savez_compressed(
+                prefix + "_render.npz",
+                arms=np.asarray(RENDER_ARMS, dtype=np.float32),
+                ring=np.asarray(RENDER_RING, dtype=np.float32),
+                fps=np.float32(RENDER_FPS_HEADLESS / max(1, VIDEO_STRIDE)),
+                stride=np.int32(_vstride))
+        except Exception as e:
+            print(f"[WARN] render state write failed: {type(e).__name__}: {e}")
 
     if COVERAGE:
         with open(prefix + "_coverage.csv", "w", newline="", encoding="utf-8") as f:

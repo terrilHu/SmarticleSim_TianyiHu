@@ -49,13 +49,21 @@ Feed straight into analysis afterward:
 """
 
 import argparse
+import contextlib
 import glob
+import io
 import itertools
 import os
 import pprint
 import subprocess
 import sys
 import time
+
+# Pure helpers, reused so the driver's pre-flight check is the same code the
+# worker would run: validate_command reads nothing, and build_strategy builds
+# plain Python objects (no config globals, no pymunk).
+from gait import validate_command
+from strategy import build_strategy
 
 # =============================================================================
 # Condition matrix — edit here
@@ -178,12 +186,18 @@ def conditions_from_files(paths):
     are exactly consistent with what config.py reads in the subprocess (no
     divergence in .py / .json, BOM, or comment handling).
     """
-    from config import _load_override_file      # shares the same implementation as config.py
+    from config import _load_override_file, _resolve_init_file_rel  # same implementation as config.py
 
     out, seen = [], {}
     for path in paths:
         settings, meta = _load_override_file(path)
         ov = dict(settings)
+        # INIT_FILE_REL is relative to *this* file, but the condition is
+        # rewritten into the driver's own _conditions directory before it
+        # runs -- resolve it now, while the original location is known
+        if ov.get("INIT_FILE_REL"):
+            ov["INIT_FILE"] = _resolve_init_file_rel(ov["INIT_FILE_REL"], path)
+        ov.pop("INIT_FILE_REL", None)
         if "_snapshot" in meta:
             # config_snapshot.json: derived quantities are recomputed from
             # input parameters, so don't write them into the condition file
@@ -290,6 +304,74 @@ def expand_config_paths(patterns):
                 seen.add(h)
                 out.append(h)
     return out
+
+
+def check_strategy_spec(overrides):
+    """
+    Pre-flight one condition's STRATEGY_SPEC. -> list of problem strings.
+
+    Worth doing in the driver because of how the simulation fails without it:
+    the strategy is built lazily on the first gait poll, inside
+    GaitController.poll's blanket ``except Exception``, which prints one
+    suppressed-after-this warning line and carries on. A misspelled role
+    parameter therefore does not stop anything -- the trial runs to completion
+    as if no strategy were configured, the worker exits 0, and the driver
+    records it as a success. At N=500 that is a three-hour trial producing
+    baseline data under a strategy condition's name.
+
+    build_strategy and validate_command are both pure (no config reads, no
+    pymunk), so running them here exercises exactly the code that would raise
+    in the worker, one process earlier and before anything has been spawned.
+    Only STRATEGY_SPEC is covered: COMMAND_ARRAY / GAIT_BY_TYPE are resolved
+    per robot at trial start and are not checked here.
+    """
+    if not overrides.get("ENABLE_RUNTIME_GAIT_CONTROL"):
+        return []
+    spec = overrides.get("STRATEGY_SPEC")
+    if spec is None:
+        return []
+
+    problems = []
+    # Every command integer in the spec, by where it came from
+    cmds = [("leave_command", spec.get("leave_command"))]
+    for i, r in enumerate(spec.get("group_rules") or []):
+        if isinstance(r, dict) and "command" in r:
+            cmds.append((f"group_rules[{i}].command", r["command"]))
+    for i, r in enumerate(spec.get("roles") or []):
+        if isinstance(r, dict) and "command" in r:
+            cmds.append((f"roles[{i}].command", r["command"]))
+    for where, cmd in cmds:
+        if cmd is None:
+            continue
+        try:
+            validate_command(cmd)
+        except ValueError as e:
+            problems.append(f"{where}: {e}")
+
+    # Selector names, their extra kwargs, and the rest of the spec's shape.
+    # Constructing the real object is the check: anything build_strategy would
+    # reject in the worker is rejected here. stdout is swallowed because a
+    # spec with verbose=True would otherwise print its banner during --list.
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            build_strategy(spec)
+    except Exception as e:
+        problems.append(f"STRATEGY_SPEC: {type(e).__name__}: {e}")
+    return problems
+
+
+def check_conditions(conditions):
+    """Pre-flight every condition, print one line per problem. -> number of bad conditions."""
+    bad = 0
+    for name, ov in conditions:
+        problems = check_strategy_spec(ov)
+        if problems:
+            bad += 1
+            src = ov.get("_source")
+            print(f"  FAIL {name}" + (f"  <- {os.path.basename(src)}" if src else ""))
+            for p in problems:
+                print(f"       {p}")
+    return bad
 
 
 def write_condition(path, name, overrides):
@@ -406,6 +488,17 @@ def main():
         print(f"From {len(paths)} config files")
     else:
         conditions = build_conditions()
+
+    # Before anything is spawned: a bad STRATEGY_SPEC does not stop the worker,
+    # it silently demotes the trial to baseline (see check_strategy_spec), so
+    # the only place it can be caught is here. --list and --dry-run report and
+    # keep going; a real run refuses to start.
+    n_bad = check_conditions(conditions)
+    if n_bad:
+        print(f"{n_bad} condition(s) have an invalid STRATEGY_SPEC "
+              f"(they would run as baseline, not fail).")
+        if not (args.list or args.dry_run):
+            return 2
 
     if args.only:
         want = set(args.only)

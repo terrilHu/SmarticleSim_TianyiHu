@@ -50,6 +50,42 @@ Consequence: the X digit (initial phase) of a RUNTIME command is ignored -- a
 mid-run switch always restarts from zero phase.  Set
 config.RUNTIME_GAIT_SWITCH_MODE = "immediate" to get the old absolute-phase
 behaviour instead (which does produce a commanded-angle jump).
+
+Phase-locked switching  (RUNTIME_GAIT_SWITCH_MODE = "phase_locked")
+-------------------------------------------------------------------
+"zero_phase" anchors the new oscillator to the moment the switch lands, so a
+robot's phase relative to the rest of the swarm depends on its switching
+history. Two things make that drift:
+  * the switch is resolved to the first physics step at or after t_cross, so
+    every switch adds up to one step (omega*dt, 4 deg at 2 Hz) of lag, and a
+    robot that switches back and forth accumulates it;
+  * with different frequencies, the end of the old gait's cycle is in general
+    not a cycle boundary of the swarm's clock.
+Replaying the a834 + group_centers runs showed ~1/4 of robots ending > 10 deg
+off the swarm phase, some by 180 deg.
+
+"phase_locked" gives every robot a fixed home clock instead. At start-up each
+robot records tau_home, the time its initial oscillator crosses zero rising
+(phase1 = -omega * tau_home). Every gait it runs afterwards uses
+phase1 = -omega_new * tau_home, so for **any** frequency its cycles start at
+tau_home + n/f. A robot that returns to a gait is back in exactly the phase it
+had at t=0, however many switches it went through.
+
+The switch lands at the first rising zero crossing of the old gait that is
+also a rising zero crossing of the new one: the end of a full cycle of both.
+The commanded angle is then 0 under either set of parameters, so it stays
+continuous. Every frequency in FREQ_TABLE is a multiple of 0.5 Hz, so such a
+common boundary comes every 1/gcd(f_old, f_new) s, at most 2 s. The robot
+keeps running its old gait until then. Example: 34 (2 Hz) -> -52 (1 Hz) waits
+up to one extra 0.5 s cycle; -52 -> 34 switches at the next crossing.
+
+If no common boundary is found within _LOCK_SEARCH_S (not reachable with this
+encoding, but e.g. after mixing modes), the switch lands at the old gait's
+next crossing and the arms are held at 0 until the new gait's next crossing.
+That costs a pause of less than one new period, but the phase is still locked.
+
+As in "zero_phase", the X digit of a runtime command is ignored: the phase
+always comes from the robot's home clock.
 """
 
 import importlib
@@ -73,6 +109,18 @@ _TWO_PI = 2.0 * math.pi
 # Fallbacks for out-of-range digits, matching the previous inline decode loop.
 _DEFAULT_FREQ_HZ = 0.5
 _DEFAULT_AMPLI   = math.pi / 4
+
+# "phase_locked" switching: how far ahead to look for a cycle boundary shared
+# by the old and the new gait, and how close (rad) counts as a shared crossing.
+_LOCK_SEARCH_S = 4.0     # > 2 s, the longest common period of FREQ_TABLE
+_LOCK_TOL      = 1e-6
+
+
+def _next_rising_crossing(omega, phase, t):
+    """First t' >= t with omega*t' + phase == 2*pi*k (rising zero crossing of sin)."""
+    k  = math.ceil((omega * t + phase) / _TWO_PI)
+    tc = (k * _TWO_PI - phase) / omega
+    return tc if tc >= t else t
 
 
 # =============================================================================
@@ -332,6 +380,7 @@ class GaitState:
     __slots__ = ("robot_id", "command", "freq_hz", "omega", "ampli",
                  "phase1", "phase2", "antiphase", "applied_t",
                  "pending_cmd", "pending_t_cross", "pending_requested_t",
+                 "pending_hold_until", "hold_until", "home_tau",
                  "history")
 
     def __init__(self, robot_id: int):
@@ -348,6 +397,11 @@ class GaitState:
         self.pending_cmd         = None   # queued command, None if nothing queued
         self.pending_t_cross     = None   # sim time it will take effect
         self.pending_requested_t = None   # sim time it was requested
+
+        # "phase_locked" mode only (see the module docstring)
+        self.pending_hold_until  = None   # fallback: hold arms at 0 until this time after switching
+        self.hold_until          = None   # set while that hold is in progress
+        self.home_tau            = 0.0    # this robot's home clock: its cycles start at home_tau + n/f
 
         self.history = []          # [(t_applied, old_cmd, new_cmd), ...]
 
@@ -371,12 +425,19 @@ def apply_command(sm, state: GaitState, cmd: int, t: float = 0.0,
         Continuity path used for mid-run switches: the new phase is solved so
         the commanded angle at time t is unchanged.  Only meaningful when
         called at/just after a zero crossing -- see the module docstring.
+    mode "phase_locked"
+        The new phase comes from the robot's home clock, phase1 =
+        -omega_new * state.home_tau, independent of t. Continuous only when
+        called at a crossing shared by both gaits, which is what
+        GaitController.request schedules.
     """
     sign, x, y, z = split_command(cmd)
     freq_hz = FREQ_TABLE[z - 1]  if 1 <= z <= 9 else _DEFAULT_FREQ_HZ
     ampli   = AMPLI_TABLE[y - 1] if 1 <= y <= 6 else _DEFAULT_AMPLI
 
-    if mode == "zero_phase":
+    if mode == "phase_locked":
+        ph1 = -(freq_hz * 2 * math.pi) * state.home_tau
+    elif mode == "zero_phase":
         # Commanded angle right now, under the OLD parameters (read before the
         # writes below).  We are at/just past a zero crossing, so it is at most
         # one ordinary trajectory step away from 0.
@@ -512,8 +573,13 @@ class GaitController:
 
         from bodies import gait_for_smarticle   # lazy: see the import note above
 
+        if switch_mode not in ("zero_phase", "immediate", "phase_locked"):
+            raise ValueError(f"RUNTIME_GAIT_SWITCH_MODE={switch_mode!r}; choices: "
+                             f"'zero_phase', 'immediate', 'phase_locked'")
+
         self.states      = []
         self._pending    = set()
+        self._holding    = set()      # phase_locked fallback: arms held at 0
         self.has_pending = False      # hot-loop guard: read once per physics step
         self._warned     = False
 
@@ -522,6 +588,10 @@ class GaitController:
             override = gait_for_smarticle(s)   # noqa: F821 (bound just above)
             cmd      = override if override is not None else commands[i]
             apply_command(s, st, cmd, t=0.0, mode="initial")
+            # Home clock for "phase_locked": the time this robot's initial
+            # oscillator crosses zero rising. Computed in every mode (it costs
+            # nothing and draws no random numbers), only used by that one.
+            st.home_tau = -st.phase1 / st.omega if st.omega > 0.0 else 0.0
             if phase_color_fn is not None:
                 s.phase_marker_color = phase_color_fn(st.phase1)
             s.warmup_steps = warmup_steps
@@ -609,9 +679,12 @@ class GaitController:
 
         sm = self.smarticles[rid]
         st = self.states[rid]
+        hold_until = None
 
         if self.switch_mode == "immediate":
             t_cross = t
+        elif self.switch_mode == "phase_locked":
+            t_cross, hold_until = self._locked_switch_time(sm, st, cmd, t)
         else:
             w = sm.omega1
             if w <= 0.0:
@@ -626,9 +699,36 @@ class GaitController:
         st.pending_cmd         = cmd
         st.pending_t_cross     = t_cross
         st.pending_requested_t = t
+        st.pending_hold_until  = hold_until
         self._pending.add(rid)
         self.has_pending = True
         return True
+
+    def _locked_switch_time(self, sm, st, cmd, t):
+        """
+        "phase_locked" scheduling: return (t_cross, hold_until).
+
+        t_cross is the first rising crossing of the current oscillator at or
+        after t that is also a rising crossing of the new gait on this robot's
+        home clock. hold_until is None then. If there is none within
+        _LOCK_SEARCH_S, t_cross is the next crossing of the current oscillator
+        and hold_until the new gait's next crossing after it: the arms wait at
+        0 in between.
+        """
+        w_new  = decode_command(cmd)["freq_hz"] * _TWO_PI
+        ph_new = -w_new * st.home_tau
+        w_old  = sm.omega1
+        if w_old <= 0.0 or w_new <= 0.0:
+            return t, None
+        t0    = _next_rising_crossing(w_old, sm.phase1, t)
+        T_old = _TWO_PI / w_old
+        n_max = int(_LOCK_SEARCH_S / T_old) + 1
+        for k in range(n_max + 1):
+            tk = t0 + k * T_old
+            u  = w_new * tk + ph_new
+            if abs(u - _TWO_PI * round(u / _TWO_PI)) < _LOCK_TOL:
+                return tk, None
+        return t0, _next_rising_crossing(w_new, ph_new, t0)
 
     # ── Per-physics-step application ─────────────────────────────────────────
 
@@ -638,23 +738,47 @@ class GaitController:
         Returns the ids applied this step (empty tuple when none), so the
         caller can refresh anything it cached from the gait parameters.
         """
-        if not self._pending:
+        if not self._pending and not self._holding:
             return ()
         changed = None
         log     = {}                     # (old, new, requested_t) -> [ids]
+        # phase_locked fallback: release arms whose hold has run out. They sit
+        # at a rising crossing of the new gait now, so restoring the amplitude
+        # leaves the commanded angle at 0.
+        for rid in tuple(self._holding):
+            st = self.states[rid]
+            if t < st.hold_until:
+                continue
+            sm = self.smarticles[rid]
+            sm.A1 = sm.A2 = st.ampli
+            st.hold_until = None
+            self._holding.discard(rid)
+            if changed is None:
+                changed = []
+            changed.append(rid)
         for rid in tuple(self._pending):
             st = self.states[rid]
             if t < st.pending_t_cross:
                 continue
             old_cmd = st.command
             req_t   = st.pending_requested_t
-            apply_command(self.smarticles[rid], st, st.pending_cmd,
-                          t=t, mode=self.switch_mode)
+            sm = self.smarticles[rid]
+            apply_command(sm, st, st.pending_cmd, t=t, mode=self.switch_mode)
+            # apply_command restored the amplitude, which ends any hold in progress
+            if rid in self._holding:
+                self._holding.discard(rid)
+                st.hold_until = None
+            hold = st.pending_hold_until
+            if hold is not None and hold > t:
+                sm.A1 = sm.A2 = 0.0      # wait at 0 for the new gait's crossing
+                st.hold_until = hold
+                self._holding.add(rid)
             if self.verbose:
                 log.setdefault((old_cmd, st.command, req_t), []).append(rid)
             st.pending_cmd         = None
             st.pending_t_cross     = None
             st.pending_requested_t = None
+            st.pending_hold_until  = None
             self._pending.discard(rid)
             if changed is None:
                 changed = []
@@ -666,7 +790,7 @@ class GaitController:
                   f"({len(ids)} robot{'s' if len(ids) > 1 else ''})  "
                   f"{old_cmd:+d} -> {format_command(new_cmd)}"
                   f"   [requested t={req_t:.4f}s]")
-        self.has_pending = bool(self._pending)
+        self.has_pending = bool(self._pending or self._holding)
         return changed if changed is not None else ()
 
     # ── Per-frame polling of the user callback ───────────────────────────────

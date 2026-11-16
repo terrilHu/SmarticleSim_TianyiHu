@@ -153,7 +153,13 @@ def frame_groups(labels, min_size):
     return out
 
 
-def track(labels, min_size):
+def track(labels, min_size, on_frame=None):
+    """Link per-frame groups into tracks.
+
+    on_frame(t, groups), if given, is called once per frame with that frame's
+    tracked groups as [(track_id, mask, size, member indices)], for callers that
+    need something per track per frame (e.g. where each group is).
+    """
     T, N = labels.shape
     tracks = {}       # id -> dict
     events = []
@@ -211,6 +217,8 @@ def track(labels, min_size):
             tr["size_sum"] += s
             tr["max_size"] = max(tr["max_size"], s)
             new_prev.append((tid, m, s, idx))
+        if on_frame is not None:
+            on_frame(t, new_prev)
         cur_tid = [x[0] for x in new_prev]
 
         for i, (tid, m, s, _) in enumerate(prev):

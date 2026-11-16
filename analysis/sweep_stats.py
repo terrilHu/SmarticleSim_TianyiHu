@@ -6,10 +6,12 @@ What differs here is the design: every condition uses the same ten initial
 conditions, so this also writes the per-(pattern, ic) values, which is what any
 paired comparison between two gaits needs.
 
-Groups only the t>=400s window straight from POS_ALL. The full group table
-would cost five times as much and write tens of GB that nothing else reads.
+Default window: the last 100 s of each trial (--last to change it; --steady
+for the steady-segment method). Reads the per-frame series cache that
+batch_group_plots.py writes when it is there, and otherwise groups that window
+straight from POS_ALL.
 
-    python sweep_stats.py datafile/1014_sweep
+    python sweep_stats.py datafile/1014_sweep [--last 100 | --steady]
 """
 
 import glob
@@ -29,8 +31,10 @@ from steady_state import steady_states
 
 FPS, MAXD = 60.0, 65.0
 
-# --- fixed-window method (the original) -------------------------------------
-T_MIN = 400.0            # last 100s of a 500s trial
+# --- fixed-window method (the default) --------------------------------------
+# The last LAST_S seconds of each trial, measured back from the trial's own
+# final frame, so the window means the same thing whatever the run length.
+LAST_S = 100.0
 
 # --- steady-state method (the default) --------------------------------------
 # Slide a window over the WHOLE trial and keep every stretch where grouping has
@@ -120,10 +124,40 @@ def per_trial_steady(path):
     return (avg("largest"), avg("mean"), avg("nosing"), frac, len(t)), segs
 
 
-def per_trial(path):
-    """-> (largest, sw_all, sw_multi, drift_pct_per_100s, n_frames)."""
+def series_cache(pos_all):
+    """The batch_group_plots.py series cache for this trial at MAXD, singletons
+    included, or None. It holds per-frame largest and sum(s^2)/sum(s) over
+    every frame, from the same grouping, so it saves regrouping POS_ALL."""
+    tag = f"{MAXD:g}".replace(".", "p")
+    hits = [p for p in glob.glob(pos_all.replace("_POS_ALL.csv", f"_series_d{tag}_b*.npz"))
+            if not p.endswith("_nosing.npz")]
+    return hits[0] if hits else None
+
+
+def _window_stats(t, largest, sw_a, sw_m):
+    # A frozen trial (largest constant) fits a slope of ~1e-14, and a cell of
+    # such trials then divides noise by noise in the drift test; call it 0.
+    drift = (0.0 if np.ptp(largest) == 0 else
+             100.0 * np.polyfit(t, largest, 1)[0] * 100.0 / largest.mean())
+    return largest.mean(), sw_a.mean(), np.nanmean(sw_m), drift, len(t)
+
+
+def per_trial(path, last_s=LAST_S):
+    """-> (largest, sw_all, sw_multi, drift_pct_per_100s, n_frames) over the
+    last `last_s` seconds of the trial."""
+    cache = series_cache(path)
+    if cache:
+        with np.load(cache) as z:
+            t, largest, sw_a = z["secs"], z["largest"], z["mean_size"]
+            n_seen = z["n_seen"]
+            n_single = z["n_groups"] - z["n_multi"]
+        keep = t > t[-1] - last_s
+        # singletons removed: sum(s^2) - n1 over sum(s) - n1
+        with np.errstate(invalid="ignore", divide="ignore"):
+            sw_m = (sw_a * n_seen - n_single) / (n_seen - n_single)
+        return _window_stats(t[keep], largest[keep], sw_a[keep], sw_m[keep])
     df = pd.read_csv(path, usecols=["Step", "Agent_ID", "X", "Y", "Theta"])
-    df = df[df["Step"] >= int(T_MIN * FPS)]
+    df = df[df["Step"] > df["Step"].max() - int(round(last_s * FPS))]
     if df.empty:
         return None
     df = df.sort_values(["Step", "Agent_ID"], kind="mergesort")
@@ -144,9 +178,7 @@ def per_trial(path):
         sw_a[k] = (s * s).sum() / s.sum()
         m = s[s >= 2]
         sw_m[k] = (m * m).sum() / m.sum() if m.size else np.nan
-    t = steps / FPS
-    drift = 100.0 * np.polyfit(t, largest, 1)[0] * 100.0 / largest.mean()
-    return largest.mean(), sw_a.mean(), np.nanmean(sw_m), drift, nf
+    return _window_stats(steps / FPS, largest, sw_a, sw_m)
 
 
 def decode(pattern):
@@ -219,17 +251,25 @@ def occurrence(sg, pt):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    method = "fixed" if "--fixed" in sys.argv else "steady"
-    root = os.path.abspath(args[0] if args
-                           else os.path.join("datafile", "1014_sweep"))
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("root", nargs="?", default=os.path.join("datafile", "1014_sweep"))
+    ap.add_argument("--steady", action="store_true",
+                    help="steady-segment method instead of the last-window default")
+    ap.add_argument("--fixed", action="store_true", help="(default; kept for old commands)")
+    ap.add_argument("--last", type=float, default=LAST_S,
+                    help="fixed window: last LAST seconds of each trial (default %(default)g)")
+    opt = ap.parse_args()
+    method = "steady" if opt.steady else "fixed"
+    root = os.path.abspath(opt.root)
     print(f"method: {method}"
           + (f" (all steady segments; window {WINDOW_S:g}s, "
              f"drift <= {MAX_DRIFT:.0%}, "
              f"{SMOOTH_S:g}s mean within +-{MAX_DEV:.0%}, "
              f"merge step <= {MAX_STEP:.0%}, "
              f"sampled at {FPS/STRIDE:g} Hz)" if method == "steady"
-             else f" (t >= {T_MIN:g}s, every frame)"))
+             else f" (last {opt.last:g}s of each trial, every frame)"))
     # Any aXYZ folder, not just a8YZ: the same sweep is run at other
     # initial-phase slots (a0YZ is the desynchronised version), and the X digit
     # does not change how any of this is computed.
@@ -259,7 +299,7 @@ def main():
                                          trial_id=tid, ic_idx=ics.get(tid, -1),
                                          seg=j, **g))
             else:
-                r = per_trial(pa[0])
+                r = per_trial(pa[0], opt.last)
             if not r or not np.isfinite(r[0]):
                 if r:
                     print(f"  [{ci}/{len(conds)}] {pat} trial {tid}: "
@@ -298,7 +338,9 @@ def main():
 
     d = pd.DataFrame(rows).sort_values(["Y", "Z"])
     pt = pd.DataFrame(per)
-    T95 = 2.262  # t, df = 9
+    # two-sided 95% t factor for each cell's own trial count
+    from scipy.stats import t as student_t
+    T95 = d.n_trials.map(lambda n: student_t.ppf(0.975, n - 1)).to_numpy()
     if method == "steady":
         # How much of the trial was steady at all. A cell resting on very
         # little steady time is flagged: its peak is then one short stretch
@@ -307,9 +349,13 @@ def main():
         status = np.where(t < 0.3, "sparse_steady",
                           np.where(t < 0.5, "marginal", "steady"))
     else:
+        # Is the mean residual trend over trials distinguishable from zero?
+        # A one-sample t test at the two-sided 95% level for this cell's own
+        # trial count (2.776 at n = 5), not a flat 2 SEM, which at small n
+        # flags cells that are within noise. A frozen cell (all drifts 0)
+        # gives 0/0 and counts as steady.
         t = (d.drift_pct_per_100s / d.drift_sem).abs()
-        status = np.where(t >= 2.0, "lower_bound",
-                          np.where(t >= 1.0, "marginal", "steady"))
+        status = np.where(t >= T95, "drifting", "steady")
 
     pd.DataFrame({
         "pattern": d.pattern, "Y": d.Y, "Z": d.Z,
@@ -319,7 +365,11 @@ def main():
         "largest_sd": d.largest_sd.round(4),
         "largest_sem": d.largest_sem.round(4),
         "largest_ci95_halfwidth": (d.largest_sem * T95).round(4),
+        **({} if method == "steady" else
+           {"drift_t": (d.drift_pct_per_100s / d.drift_sem).round(3),
+            "drift_t_crit": np.round(T95, 3)}),
         "method": method,
+        "window_s": (np.nan if method == "steady" else opt.last),
         ("steady_frac" if method == "steady" else "drift_pct_per_100s"):
             d.drift_pct_per_100s.round(3),
         ("steady_frac_sem" if method == "steady" else "drift_sem"):
@@ -340,6 +390,7 @@ def main():
         "nosing_sem": d.nosing_sem.round(4),
         "nosing_ci95_halfwidth": (d.nosing_sem * T95).round(4),
         "method": method,
+        "window_s": (np.nan if method == "steady" else opt.last),
     }).to_csv(os.path.join(root, "sweep_mean_groupsize.csv"), index=False)
 
     pt.to_csv(os.path.join(root, "_sweep_per_trial.csv"), index=False)

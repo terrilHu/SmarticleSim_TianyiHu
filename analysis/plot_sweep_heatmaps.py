@@ -8,13 +8,15 @@ rather than left to look like low values -- they are not low, they were never
 measured, because the arms could not deliver the commanded amplitude there.
 
 If group_persistence.py has been run on the sweep, a third figure shows the
-membership memory q(30 s), in green so it is not read as a size.
+membership memory q(tau) at --q-lag seconds (default 50), in green so it is not
+read as a size.
 
 With the steady-state method, a fourth figure shows how long the steady states
 last, from _sweep_steady_segments.csv, in orange so it is read as a duration
 rather than a size.
 
-    python plot_sweep_heatmaps.py datafile/1014_sweep [--only largest mean q30 duration]
+    python plot_sweep_heatmaps.py datafile/1014_sweep [--only largest mean q duration]
+        [--out analysis] [--q-lag 50] [--scale-largest LO HI] [--scale-mean LO HI]
 """
 
 import math
@@ -27,6 +29,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Rectangle
+
+# gait.py (the amplitude / frequency tables) lives one level up.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scipy.stats import t as student_t
 
 # Keep SVG text as text and pin one installed font name. matplotlib's default
@@ -61,6 +67,16 @@ ORANGE = ["#ffd5c6", "#ffbfa8", "#ffa98a", "#f8946f", "#f37e52", "#eb6834",
           "#da5821", "#c94908", "#b43f01", "#9e3703", "#8a2e01", "#752601",
           "#611e01"]
 CMAP_ORANGE = LinearSegmentedColormap.from_list("seq_orange", ORANGE)
+# Gap between the value and its +-SEM inside a cell, in font heights. At 0.8
+# the two lines touched; 1.3 keeps them apart and still well inside a cell.
+CELL_LINESPACING = 1.3
+# Gaits the pilot kept although the delivered amplitude missed the commanded
+# one by a little more than its 5% limit (measured in the pilot), keyed by the
+# gait digits (Y, Z) of aXYZ, so every phase slot of the table is covered. They
+# are drawn with their value and hatched, not dropped: the error is ~1 deg at
+# 15 deg, and the grey cells, which missed by far more, are a different case.
+MARGINAL_AMPLI = {(1, 7): 6.2, (1, 8): 6.7}     # % amplitude error
+AMPLI_LIMIT_PCT = 5
 C_EMPTY = "#e8e6e1"      # a cell that was never measured
 INK, INK_LIGHT, MUTED = "#1a1a1a", "#ffffff", "#55534e"
 
@@ -75,6 +91,12 @@ TITLE_Y = 62.1
 FS_TEXT, FS_TITLE, FS_NOTE = 13, 12, 8.5
 
 
+def hatch_note():
+    errs = " / ".join(f"{v:g}%" for v in MARGINAL_AMPLI.values())
+    return (f"hatched = delivered amplitude off the commanded one by {errs} "
+            f"(pilot limit {AMPLI_LIMIT_PCT}%): at the edge of trustworthy")
+
+
 def _fig_rect(box):
     x, y, w, h = box
     return [x / PAGE_W, 1 - (y + h) / PAGE_H, w / PAGE_W, h / PAGE_H]
@@ -83,6 +105,9 @@ def _fig_rect(box):
 def heatmap(df, value_col, sem_col, title, cbar_label, note, path,
             status_col=None, vmin=None, vmax=None, digits=1, cmap=CMAP,
             cbar_ticks=None, sem_digits=None):
+    # Two-digit colourbar ticks do not fit the reference page: the label would
+    # sit on them. Give it room and let the page grow by that much.
+    wide = vmax is not None and vmax >= 10 and (cbar_ticks is None or max(cbar_ticks) >= 10)
     amps = sorted(df.cmd_ampli_deg.unique())
     freqs = sorted(df.cmd_freq_hz.unique())
     # Rows are frequency, columns are amplitude: amplitude is the variable
@@ -91,14 +116,20 @@ def heatmap(df, value_col, sem_col, title, cbar_label, note, path,
     V = np.full((len(freqs), len(amps)), np.nan)
     S = np.full((len(freqs), len(amps)), np.nan)
     flag = np.zeros((len(freqs), len(amps)), dtype=bool)
+    hatch = np.zeros((len(freqs), len(amps)), dtype=bool)
     for _, r in df.iterrows():
         i, j = freqs.index(r.cmd_freq_hz), amps.index(r.cmd_ampli_deg)
+        if "Y" in r and (int(r.Y), int(r.Z)) in MARGINAL_AMPLI:
+            hatch[i, j] = True
         V[i, j] = r[value_col]
         S[i, j] = r[sem_col]
         # Anything the stats step did not certify as settled gets marked.
         # What counts as not-settled depends on the method, so key off the
         # one good value rather than enumerate the bad ones.
-        if status_col and str(r.get(status_col, "steady")) != "steady":
+        # Fixed window: nothing is marked on the figure; the drift test and
+        # its outcome are reported in the method note instead.
+        st = str(r.get(status_col, "steady")) if status_col else "steady"
+        if r.get("method") != "fixed" and st != "steady":
             flag[i, j] = True
 
     fig = plt.figure(figsize=(PAGE_W / 72, PAGE_H / 72))
@@ -127,10 +158,19 @@ def heatmap(df, value_col, sem_col, title, cbar_label, note, path,
             lum = float(lin @ [0.2126, 0.7152, 0.0722])
             col = INK if (lum + 0.05) / 0.05 > 1.05 / (lum + 0.05) else INK_LIGHT
             mark = " *" if flag[i, j] else ""
+            if hatch[i, j]:
+                # Hatch in the cell's own text ink, faint, so it reads on any
+                # fill without changing the colour that encodes the value.
+                ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False,
+                                       hatch="//", lw=0, zorder=2,
+                                       edgecolor=(*matplotlib.colors.to_rgb(col), 0.4)))
             sd = digits + 1 if sem_digits is None else sem_digits
             ax.text(j, i, f"{V[i, j]:.{digits}f}{mark}\n±{S[i, j]:.{sd}f}",
                     ha="center", va="center", fontsize=FS_TEXT, color=col,
-                    linespacing=0.8)
+                    linespacing=CELL_LINESPACING, zorder=3,
+                    # keep the hatch off the digits: a patch of the cell's own fill
+                    bbox=(dict(facecolor=rgb, edgecolor="none", pad=2.0)
+                          if hatch[i, j] else None))
 
     ax.set_xticks(range(len(amps)))
     ax.set_xticklabels([f"{a:g}°" for a in amps])
@@ -142,6 +182,8 @@ def heatmap(df, value_col, sem_col, title, cbar_label, note, path,
     # Note above the title, both on the page rather than the axes, at the
     # reference figure's baselines.
     xc = (AX_BOX[0] + AX_BOX[2] / 2) / PAGE_W
+    if hatch.any():
+        note = note + chr(10) + hatch_note()
     lines = note.splitlines()
     for k, line in enumerate(lines):
         y = NOTE_Y[k] if k < len(NOTE_Y) else NOTE_Y[-1] + (k - len(NOTE_Y) + 1) * 10.8
@@ -160,12 +202,23 @@ def heatmap(df, value_col, sem_col, title, cbar_label, note, path,
     # The colourbar label sits at the page edge, so wide tick labels push it
     # off; a fractional scale passes coarser ticks.
     cb = fig.colorbar(im, cax=fig.add_axes(_fig_rect(CBAR_BOX)), ticks=cbar_ticks)
-    cb.set_label(cbar_label, fontsize=FS_TEXT, labelpad=1)
+    cb.set_label(cbar_label, fontsize=FS_TEXT, labelpad=7 if wide else 1)
     cb.outline.set_visible(False)
     cb.ax.tick_params(length=4, width=0.8, labelsize=FS_TEXT)
 
+    stem = os.path.splitext(path)[0]
     for ext in ("svg", "png"):
-        fig.savefig(f"{os.path.splitext(path)[0]}.{ext}", dpi=150)
+        fig.savefig(f"{stem}.{ext}", dpi=150,
+                    **({"bbox_inches": "tight", "pad_inches": 0.08} if wide else {}))
+    # A bare copy for figure assembly: only the cells, their values, the axes
+    # and the colourbar ticks -- no title, method notes or colourbar label.
+    # Cropped to what is left, since the notes' band would otherwise stay empty.
+    for t in list(fig.texts):
+        t.remove()
+    cb.set_label("")
+    for ext in ("svg", "png"):
+        fig.savefig(f"{stem}_clean.{ext}", dpi=150, bbox_inches="tight",
+                    pad_inches=0.05)
     plt.close(fig)
     return f"{os.path.splitext(path)[0]}.svg"
 
@@ -182,30 +235,49 @@ SCALE_Q30 = (0.4, 1.0)   # observed 0.66-1.00 synchronised, 0.50-0.98 desynchron
 # leave the colourbar label room on the page, where 3-digit seconds did not.
 SCALE_DUR = (1.0, 8.0)
 
-# q(30 s) comes from group_persistence.py's per-trial table; keep its window
-# settings quoted from the module so the note cannot drift from the numbers.
-Q_LAG_S = 30
+# q(tau) comes from group_persistence.py's per-trial table (column q_<tau>s);
+# keep its window settings quoted from the module so the note cannot drift
+# from the numbers. --q-lag picks the lag.
+Q_LAG_S = 50
+SCALE_Q = SCALE_Q30
+Q_T0_S = 0.0     # earliest time origin of q: 0 = the whole run (--q-t0)
+DEFAULT_SCALES = {"largest": SCALE_LARGEST, "mean": SCALE_MEAN, "q": SCALE_Q30}
+N_ROBOTS = 100
+
+
+def scale_txt(name, rng):
+    """How the colour scale is described: shared with the 1014 sweeps when it is
+    their scale, otherwise just fixed (a different N has a different range)."""
+    if tuple(rng) == tuple(DEFAULT_SCALES[name]):
+        return "colour scale shared with the 1014 sweeps"
+    return f"colour scale fixed at {rng[0]:g}-{rng[1]:g}"
 
 
 def persistence_table(root):
     """
     Per-gait mean / sd / sem of q(30 s) over trials, or None if
     group_persistence.py has not been run on this sweep. Also written out as
-    sweep_q30.csv beside the other sweep_*.csv tables.
+    sweep_q<lag>.csv beside the other sweep_*.csv tables.
     """
-    path = os.path.join(root, "_persistence_per_trial.csv")
+    from group_persistence import out_suffix
+    sfx = out_suffix(Q_T0_S)
+    path = os.path.join(root, f"_persistence_per_trial{sfx}.csv")
     if not os.path.isfile(path):
         return None
     p = pd.read_csv(path)
     col = f"q_{Q_LAG_S}s"
+    if col not in p.columns:
+        raise SystemExit(f"{path} has no {col}; rerun group_persistence.py "
+                         f"with {Q_LAG_S} in FIXED_LAGS_S")
     g = p.groupby("pattern")[col]
-    t = pd.DataFrame({"n_trials": g.size(), "q30_mean": g.mean(), "q30_sd": g.std()})
-    t["q30_sem"] = t.q30_sd / np.sqrt(t.n_trials)
-    t["q30_ci95_halfwidth"] = t.q30_sem * t.n_trials.map(lambda n: student_t.ppf(0.975, n - 1))
+    k = f"q{Q_LAG_S}"
+    t = pd.DataFrame({"n_trials": g.size(), f"{k}_mean": g.mean(), f"{k}_sd": g.std()})
+    t[f"{k}_sem"] = t[f"{k}_sd"] / np.sqrt(t.n_trials)
+    t[f"{k}_ci95_halfwidth"] = t[f"{k}_sem"] * t.n_trials.map(lambda n: student_t.ppf(0.975, n - 1))
     gait = pd.read_csv(os.path.join(root, "_sweep_per_trial.csv"))[
         ["pattern", "Y", "Z", "cmd_ampli_deg", "cmd_freq_hz"]].drop_duplicates("pattern")
     t = gait.merge(t.reset_index(), on="pattern")
-    t.to_csv(os.path.join(root, "sweep_q30.csv"), index=False)
+    t.to_csv(os.path.join(root, f"sweep_{k}{sfx}.csv"), index=False)
     return t
 
 def duration_table(root):
@@ -278,14 +350,15 @@ def persistence_note(q):
     """Method-note section for the q(30 s) figure; empty when it was not drawn."""
     if q is None:
         return ""
-    from group_persistence import BLOCK_S, MIN_SIZE, SAMPLE_HZ, T0_S
+    from group_persistence import BLOCK_S, MIN_SIZE, SAMPLE_HZ, out_suffix
+    sfx = out_suffix(Q_T0_S)
     NL = chr(10)
-    m, lag, t0 = str(MIN_SIZE), str(Q_LAG_S), f"{T0_S:g}"
+    m, lag, t0 = str(MIN_SIZE), str(Q_LAG_S), f"{Q_T0_S:g}"
     per = int(round(BLOCK_S * SAMPLE_HZ))
     return (
         "## Membership memory q(" + lag + " s)" + NL + NL +
-        "From `_persistence_per_trial.csv` (`group_persistence.py`), summarised "
-        "in `sweep_q30.csv`. q asks each robot: of the robots I am grouped with "
+        "From `_persistence_per_trial" + sfx + ".csv` (`group_persistence.py "
+        "--t0 " + t0 + "`), summarised in `sweep_q" + lag + sfx + ".csv`. q asks each robot: of the robots I am grouped with "
         "now, what share am I still grouped with " + lag + " s later?" + NL + NL +
         "### Who is grouped with whom" + NL + NL +
         "Contacts blink on and off at sub-second scale, so time is cut into "
@@ -335,15 +408,21 @@ def persistence_note(q):
         "at each origin has weight 1, whatever the size of its group. This is "
         "done per trial; the heat map shows q(" + lag + " s) averaged over trials, "
         "with the SEM over trials." + NL + NL +
+        ("Origins cover the whole run (t >= 0), so the first minutes, when the "
+         "robots are still clustering out of the initial condition and "
+         "memberships turn over fastest, are included. The earlier figures used "
+         "origins t >= 200 s only; that version is kept in "
+         "`_persistence_per_trial.csv` / `sweep_q" + lag + ".csv` when it has "
+         "been computed." + NL + NL if Q_T0_S == 0 else "") +
         "q(tau) = 1 means the partition is frozen. Under a full random "
-        "reshuffle q is close to 0 (two groups of five out of 100 robots share "
-        "about 0.16 robots by chance), so the 0-1 range can be read as an "
-        "absolute scale. The size-weighted pair version, "
+        "reshuffle q is close to 0 (two groups of five out of " + str(N_ROBOTS) +
+        " robots share about " + f"{16 / (N_ROBOTS - 1):.2g}" + " robots by "
+        "chance), so the 0-1 range can be read as an absolute scale. The size-weighted pair version, "
         r"$\sum_{(i,t)} |G_i(t) \cap G_i(t+\tau)| \,/\, \sum_{(i,t)} |G_i(t)|$"
         ", is the probability that two robots grouped together now are grouped "
         "together again tau later (the lagged association rate of "
         "animal-behaviour work, Whitehead 1995); it is kept in the csv as "
-        "`pair_q_30s`." + NL + NL +
+        "`pair_q_30s` (30 s lag only)." + NL + NL +
         "No group is tracked, so q has none of Kaplan-Meier's problems: no "
         "group identity to decide at merges and splits, no right-censoring of "
         "groups that outlive the run, and the sample is the trial, not the "
@@ -351,14 +430,52 @@ def persistence_note(q):
         "The lag is a choice, not a fit. q is not a single exponential in lag, "
         "so its value depends on the lag, but the ordering of gaits does not: "
         "q at 10, 30 and 60 s rank the gaits almost identically (Spearman 0.99 "
-        "in the synchronised sweep). Error bars as above: one number per trial, "
-        "SEM over trials. Colour scale fixed at " + f"{SCALE_Q30[0]:g}-{SCALE_Q30[1]:g}" +
-        ", shared with the other sweep." + NL + NL +
+        "in the 1014 synchronised sweep). Error bars as above: one number per "
+        "trial, SEM over trials. " + scale_txt("q", SCALE_Q).capitalize() +
+        "." + NL + NL +
         "Caveat: q close to 1 at small amplitude partly reflects robots that "
         "barely move, not a structure that is actively held together." + NL + NL)
 
 
+def drift_section(lg):
+    """Method-note paragraph on whether the window was still drifting, with
+    this sweep's outcome. Nothing is marked on the figures for it."""
+    NL = chr(10)
+    n = int(lg.n_trials.iloc[0])
+    tc = float(student_t.ppf(0.975, n - 1))
+    d = lg.assign(t=(lg.drift_pct_per_100s / lg.drift_sem).abs().fillna(0.0))
+    over = d[d.t >= tc]
+    top = d.sort_values("t", ascending=False).head(3)
+    def cell(r):
+        return (f"{r.cmd_ampli_deg:g} deg / {r.cmd_freq_hz:g} Hz ({r.pattern}): "
+                f"{r.drift_pct_per_100s:+.1f} +- {r.drift_sem:.1f} %/100 s, |t| = {r.t:.2f}")
+    res = ("No cell reaches it" if over.empty else
+           f"{len(over)} of {len(d)} cells reach it: " + "; ".join(cell(r) for r in over.itertuples()))
+    return (
+        "**Was the window still drifting?** For each trial, the least-squares "
+        "slope of the largest group across the window, as % of its mean per "
+        "100 s (`drift_pct_per_100s` in `_sweep_per_trial.csv`). A cell's trials "
+        "are then tested for a mean slope different from zero with a one-sample "
+        f"t test, two-sided 95%: |mean| / SEM >= t(0.975, df = {n - 1}) = {tc:.3f} "
+        "(`drift_t`, `drift_t_crit` and `status` in `sweep_largest_groupsize.csv`). "
+        "A trial whose largest group never changes in the window has slope 0, "
+        "and a cell of such trials counts as not drifting. A drifting cell "
+        "would mean the value was still changing when the trials ended (if "
+        "rising, a lower bound)." + NL + NL +
+        "Result: " + res + ". Largest |t|: " +
+        "; ".join(cell(r) for r in top.itertuples()) + "." + NL + NL +
+        "Nothing is marked on the figures for this; the test is reported here "
+        f"only. An earlier version used a flat 2 SEM cut, which at n = {n} "
+        f"is looser than the {tc:.3f} above: with no real drift it flags a "
+        f"cell with probability {2 * student_t.sf(2.0, n - 1):.2f}, so about "
+        f"{2 * student_t.sf(2.0, n - 1) * len(d):.0f} of {len(d)} cells by chance."
+    )
+
+
 def write_method_note(out, root, lg, mn, q=None, dur=None):
+    from gait import AMPLI_TABLE, FREQ_TABLE
+    AMPLI_DEG = {k + 1: round(math.degrees(a)) for k, a in enumerate(AMPLI_TABLE)}
+    FREQ_HZ = {k + 1: f for k, f in enumerate(FREQ_TABLE)}
     """
     Write the method note next to the figures, filling in the parameters this
     particular set was actually produced with rather than restating defaults.
@@ -370,6 +487,7 @@ def write_method_note(out, root, lg, mn, q=None, dur=None):
     n_tr = int(lg["n_trials"].iloc[0])
     n_cells = len(lg)
     n_fr = int(lg["n_frames_per_trial"].iloc[0])
+    t95 = f"{student_t.ppf(0.975, n_tr - 1):.3f}"
 
     if method == "steady":
         how = (
@@ -405,13 +523,11 @@ def write_method_note(out, root, lg, mn, q=None, dur=None):
         window = "sliding, " + WIN_TXT
     else:
         how = (
-            "**Fixed window.** Every trial is averaged over t >= 400 s, the last "
-            "100 s of a 500 s run. `drift_sigma` reports how far the residual "
-            "trend inside that window is from zero; a cell at 2 sigma or more is "
-            "marked `*` on the figure, meaning the value was still rising when the "
-            "trial ended and is therefore a lower bound."
+            "**Fixed window.** Every trial is averaged over its last " + LAST_TXT +
+            ", counted back from the trial's own final frame, every frame." + NL + NL +
+            drift_section(lg)
         )
-        window = "fixed, t >= 400 s"
+        window = "fixed, last " + LAST_TXT
 
     txt = (
         "# " + name + " -- group-size heat maps" + NL + NL +
@@ -424,6 +540,19 @@ def write_method_note(out, root, lg, mn, q=None, dur=None):
         "drawn as *not measured* -- the pilot found the arms could not deliver the "
         "commanded amplitude there, so those gaits were never run. They are not "
         "low values." + NL + NL +
+        "**Hatched cells.** " + ", ".join(
+            f"Y{y}Z{z} ({AMPLI_DEG[y]:g} deg, {FREQ_HZ[z]:g} Hz): {e:g}%"
+            for (y, z), e in MARGINAL_AMPLI.items()) +
+        " amplitude error. The pilot kept these two gaits, although the "
+        "delivered amplitude missed the commanded one by a little more than its "
+        + str(AMPLI_LIMIT_PCT) + "% limit -- far less than the gaits drawn grey. "
+        "They are shown with their measured values and hatched, so the reader "
+        "can weigh them. At 15 deg the error is about 1 deg; across the 15 deg "
+        "-> 30 deg step the largest group changes by roughly 1-3 robots, so a "
+        "1 deg error shifts it by an estimated 0.1-0.2 if the dependence is "
+        "close to linear -- below these cells' SEM. That is an estimate, not a "
+        "measurement. A conclusion that rests on these two cells should be "
+        "checked with them left out." + NL + NL +
         "- **largest group size** -- the biggest group present, per frame." + NL +
         "- **mean group size** -- size-weighted, `sum(s^2)/sum(s)`: pick a robot at "
         "random, how big is its group. Singletons included; the csv also carries "
@@ -432,36 +561,43 @@ def write_method_note(out, root, lg, mn, q=None, dur=None):
         "Voronoi (Delaunay) adjacency cut at `max_dist = 65 px`, then connected "
         "components -- the same function the live strategy uses. Body length is "
         "105 px in these runs, so the threshold is a constant 0.62 body lengths." + NL + NL +
+        "## Robots and trials" + NL + NL +
+        "N = " + str(N_ROBOTS) + " robots, no strategy, " + str(n_tr) +
+        " trials per cell." + NL + NL +
         "## Which part of the trial" + NL + NL +
         how + NL + NL +
         "## Error bars" + NL + NL +
         "Each trial is reduced to one number, and the statistics are taken across "
-        "the " + str(n_tr) + " trials. Frames are not independent samples: the "
-        "largest-group series has an autocorrelation time of about 27 s, so a "
-        "trial contributes a handful of independent samples, not thousands. "
-        "Treating frames as independent gives an error bar ~59x too small." + NL + NL +
+        "the " + str(n_tr) + " trials. Frames are not independent samples: in "
+        "the 1014 sweep (N=100) the largest-group series had an autocorrelation "
+        "time of about 27 s, so a trial contributes a handful of independent "
+        "samples, not thousands, and treating frames as independent gave an "
+        "error bar ~59x too small." + NL + NL +
         "- `sd` -- spread of individual trials." + NL +
         "- `sem` -- `sd/sqrt(" + str(n_tr) + ")`, the uncertainty of the cell's "
         "mean. This is the +/- printed in each cell." + NL +
-        "- `ci95_halfwidth` -- `sem * 2.262`, the t factor for df = " + str(n_tr - 1) +
+        "- `ci95_halfwidth` -- `sem * " + t95 + "`, the t factor for df = " + str(n_tr - 1) +
         ". Not 1.96; with n = " + str(n_tr) + " the normal approximation is wrong." + NL + NL +
-        "All " + str(n_cells) + " cells use the same ten initial conditions, so a "
+        "All " + str(n_cells) + " cells use the same " + str(n_tr) +
+        " initial conditions, so a "
         "comparison between two cells -- or between this sweep and its counterpart "
         "-- should be made on the paired differences in `_sweep_per_trial.csv`, "
         "not from the individual error bars, which double-count the shared "
         "initial-condition variation." + NL + NL +
         "## Colour scale" + NL + NL +
-        "Fixed at " + str(SCALE_LARGEST[0]) + "-" + str(SCALE_LARGEST[1]) +
-        " for largest and " + str(SCALE_MEAN[0]) + "-" + str(SCALE_MEAN[1]) +
-        " for mean, shared with the other sweep so the same blue means the same "
-        "number in both. Single-hue sequential: a rainbow map would invent "
-        "ordering the data does not have." + NL + NL +
+        "Largest: " + scale_txt("largest", SCALE_L) + ". Mean: " +
+        scale_txt("mean", SCALE_M) + ". Fixed rather than autoscaled, so a "
+        "figure redrawn on its own lands on the same scale; where a scale is "
+        "shared with the 1014 sweeps the same blue means the same number. "
+        "Single-hue sequential: a rainbow map would invent ordering the data "
+        "does not have." + NL + NL +
         persistence_note(q) +
         duration_note(dur) +
         "## Not covered by the error bars" + NL + NL +
         "`max_dist = 65 px`; the window choice (" + window + "); and the gap "
         "between commanded and delivered amplitude, which the pilot measured at "
-        "up to 6.7% even among the cells that were kept." + NL
+        "up to " + f"{max(MARGINAL_AMPLI.values()):g}" + "% among the cells that "
+        "were kept (the hatched ones)." + NL
     )
     path = os.path.join(out, "METHOD.md")
     with open(path, "w", encoding="utf-8") as f:
@@ -472,81 +608,121 @@ def write_method_note(out, root, lg, mn, q=None, dur=None):
 OUT_SUBDIR = "analysis"
 
 
-FIGURES = ("largest", "mean", "q30", "duration")
+FIGURES = ("largest", "mean", "q", "q30", "duration")    # q30: old name of q
+SCALE_L, SCALE_M = SCALE_LARGEST, SCALE_MEAN
+LAST_TXT = "100 s"
+
+
+def n_robots(root):
+    """Robot count from the sweep's summary.csv (n_smarticles), else 100."""
+    f = os.path.join(root, "summary.csv")
+    if os.path.isfile(f):
+        s = pd.read_csv(f, nrows=1)
+        if "n_smarticles" in s.columns:
+            return int(s.n_smarticles.iloc[0])
+    return 100
 
 
 def main():
+    global Q_LAG_S, Q_T0_S, SCALE_Q, SCALE_L, SCALE_M, N_ROBOTS, LAST_TXT
     import argparse
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("root", nargs="?", default=os.path.join("datafile", "1014_sweep"))
     # The figures in analysis/ get finished by hand; --only redraws one
     # without overwriting the others.
     ap.add_argument("--only", nargs="+", choices=FIGURES, default=list(FIGURES))
+    ap.add_argument("--out", default=OUT_SUBDIR,
+                    help="output folder, relative to root (default %(default)s)")
+    ap.add_argument("--q-lag", type=int, default=Q_LAG_S,
+                    help="lag (s) of the membership-memory figure (default %(default)s)")
+    ap.add_argument("--q-t0", type=float, default=Q_T0_S,
+                    help="earliest time origin of q, s (default %(default)g = whole run); "
+                         "needs group_persistence.py --t0 with the same value")
+    ap.add_argument("--n-robots", type=int, default=None,
+                    help="robot count for the notes (default: from summary.csv)")
+    # Colour scales; the defaults are the ones shared by the two 1014 sweeps.
+    ap.add_argument("--scale-largest", nargs=2, type=float, default=SCALE_LARGEST)
+    ap.add_argument("--scale-mean", nargs=2, type=float, default=SCALE_MEAN)
+    ap.add_argument("--scale-q", nargs=2, type=float, default=SCALE_Q30)
     args = ap.parse_args()
     root = args.root
+    Q_LAG_S = args.q_lag
+    Q_T0_S = args.q_t0
+    SCALE_L, SCALE_M, SCALE_Q = (tuple(args.scale_largest), tuple(args.scale_mean),
+                                 tuple(args.scale_q))
+    N_ROBOTS = args.n_robots or n_robots(root)
+    only = {"q" if f == "q30" else f for f in args.only}
     lg = pd.read_csv(os.path.join(root, "sweep_largest_groupsize.csv"))
     mn = pd.read_csv(os.path.join(root, "sweep_mean_groupsize.csv"))
     # Figures and their method note go in one folder, so a set can be handed on
     # without the reader having to reconstruct how the numbers were made.
-    out = os.path.join(root, OUT_SUBDIR)
+    out = os.path.join(root, args.out)
     os.makedirs(out, exist_ok=True)
     n = int(lg.n_trials.iloc[0])
     # The subtitle has to follow the method the csv was produced with --
     # stating a fixed window over steady-state numbers would misdescribe
     # the figure.
     method = str(lg["method"].iloc[0]) if "method" in lg.columns else "fixed"
+    if method == "fixed":
+        w = lg["window_s"].iloc[0] if "window_s" in lg.columns else 100.0
+        LAST_TXT = f"{w:g} s"
     span = (f"all steady stretches (sliding {WIN_TXT} window, drift ≤ {DRIFT_TXT}, band ±{DEV_TXT})"
-            if method == "steady" else "t≥400s of a 500s trial")
-    flag_txt = ("* = under half the trial was steady, so the value rests on little data"
-                if method == "steady"
-                else "* = still drifting at the end of the window (residual trend ≥ 2σ), so a lower bound")
-    base = (f"N=100, no strategy, {span}, max_dist=65px"
-            "  |  colour scale shared with the other sweep" + chr(10) +
-            f"cell: mean ± SEM over {n} trials, the same {n} initial "
-            "conditions in every cell")
+            if method == "steady" else f"last {LAST_TXT.replace(' ', '')} of each trial")
+    flag_txt = (chr(10) + "* = under half the trial was steady, so the value rests on little data"
+                if method == "steady" else "")
+    head = f"N={N_ROBOTS}, no strategy, {span}, max_dist=65px"
+    cells = (f"cell: mean ± SEM over {n} trials, the same {n} initial "
+             "conditions in every cell")
+    word = "steady-state " if method == "steady" else ""
+    when = "" if method == "steady" else f" (last {LAST_TXT})"
 
     figs = []
-    if "largest" in args.only:
+    if "largest" in only:
         figs.append(heatmap(lg, "largest_mean", "largest_sem",
-                            "Largest steady-state group size",
+                            f"Largest {word}group size{when}",
                             "Robots in the largest group",
-                            base + chr(10) + flag_txt,
+                            head + "  |  " + scale_txt("largest", SCALE_L) + chr(10) +
+                            cells + flag_txt,
                             os.path.join(out, "heatmap_largest_groupsize"),
                             status_col="status",
-                            vmin=SCALE_LARGEST[0], vmax=SCALE_LARGEST[1]))
-    if "mean" in args.only:
+                            vmin=SCALE_L[0], vmax=SCALE_L[1]))
+    if "mean" in only:
         figs.append(heatmap(mn, "mean_size_w_mean", "mean_size_w_sem",
-                            "Mean steady-state group size",
+                            f"Mean {word}group size{when}",
                             "Size-weighted mean group size",
-                            base + "\nsize-weighted, singletons included "
-                                   "(∑s²/∑s: pick a robot, how big is its group)",
+                            head + "  |  " + scale_txt("mean", SCALE_M) + chr(10) +
+                            cells + "\nsize-weighted, singletons included "
+                                    "(∑s²/∑s: pick a robot, how big is its group)",
                             os.path.join(out, "heatmap_mean_groupsize"),
-                            vmin=SCALE_MEAN[0], vmax=SCALE_MEAN[1]))
+                            vmin=SCALE_M[0], vmax=SCALE_M[1]))
     q = persistence_table(root)
-    if q is not None and "q30" in args.only:
-        from group_persistence import BLOCK_S, MIN_SIZE, T0_S
+    if q is not None and "q" in only:
+        from group_persistence import BLOCK_S, MIN_SIZE
+        origins = ("all time origins" if Q_T0_S == 0
+                   else f"time origins t≥{Q_T0_S:g}s")
         nq = int(q.n_trials.iloc[0])
+        k = f"q{Q_LAG_S}"
         figs.append(heatmap(
-            q, "q30_mean", "q30_sem",
+            q, f"{k}_mean", f"{k}_sem",
             f"Group membership memory q({Q_LAG_S} s)",
             f"Groupmates still shared after {Q_LAG_S} s",
-            f"N=100, no strategy, time origins t≥{T0_S:g}s, max_dist=65px, "
+            f"N={N_ROBOTS}, no strategy, {origins}, max_dist=65px, "
             f"groups ≥{MIN_SIZE}, {BLOCK_S:g}s majority blocks"
-            " | colour scale shared with the other sweep" + chr(10) +
+            " | " + scale_txt("q", SCALE_Q) + chr(10) +
             f"cell: mean ± SEM over {nq} trials, the same {nq} initial "
             "conditions in every cell" + chr(10) +
             f"q = share of a robot's groupmates still grouped with it {Q_LAG_S} s later "
             "(1 = frozen, 0 = fully reshuffled)",
-            os.path.join(out, f"heatmap_q{Q_LAG_S}"),
-            vmin=SCALE_Q30[0], vmax=SCALE_Q30[1], digits=2, cmap=CMAP_GREEN,
-            cbar_ticks=np.arange(SCALE_Q30[0], SCALE_Q30[1] + 1e-9, 0.1)))
+            os.path.join(out, f"heatmap_{k}"),
+            vmin=SCALE_Q[0], vmax=SCALE_Q[1], digits=2, cmap=CMAP_GREEN,
+            cbar_ticks=np.arange(SCALE_Q[0], SCALE_Q[1] + 1e-9, 0.1)))
     dur = duration_table(root) if method == "steady" else None
-    if dur is not None and "duration" in args.only:
+    if dur is not None and "duration" in only:
         figs.append(heatmap(
             dur, "seg_dur_mean_min", "seg_dur_sem_min",
             "Steady-state duration",
             "Length of a steady state (min)",
-            base + chr(10) +
+            head + chr(10) + cells + chr(10) +
             "a trial's value = mean length of its steady segments "
             "(each ≥ 1 min; a trial lasts 8.3 min)",
             os.path.join(out, "heatmap_steady_duration"),

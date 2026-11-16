@@ -85,6 +85,18 @@ def _load_override_file(path):
     return settings, meta
 
 
+def _resolve_init_file_rel(rel, cfg_path=None):
+    """
+    Absolute path for INIT_FILE_REL. The base is the directory of the file
+    that wrote it: the override file cfg_path, or config.py itself when there
+    is none. An absolute rel is returned unchanged (os.path.join drops the
+    base). experiments.py and GetSpawnPositions.py call this too, so the
+    driver and the worker always agree on the same file.
+    """
+    base = os.path.dirname(os.path.abspath(cfg_path or __file__))
+    return os.path.normpath(os.path.join(base, rel))
+
+
 # SMARTICLE_CONFIG accepts only **one** file: config executes once on import,
 # so one process is one experiment. To run a series of configs in sequence,
 # use experiments.py --configs a.py b.py.
@@ -151,6 +163,13 @@ RECORD_FIRST_N    = 200       # record the first N trials
 VIDEO_FPS         = 30      # output video fps
 VIDEO_STRIDE      = 2       # write 1 frame every N simulation frames
 VIDEO_CODEC       = "mp4v"  # OpenCV fourcc
+# Screenshots at evenly spaced moments, independent of RECORD_VIDEO, so a run
+# can keep a visual record without the cost of a full video.  N divides the
+# recorded span (first recorded frame .. MAX_RUNTIME) into N equal parts and
+# saves a PNG at every division point, both ends included: N + 1 images, each
+# from the frame nearest its target time.  0 = off.  Written to
+# videos/<exp_name>/trial_XXXX_snapshots/, for the trials RECORD_POLICY selects.
+SNAPSHOT_DIVISIONS = _ov("SNAPSHOT_DIVISIONS", 0)
 
 # ── Warmup ────────────────────────────────────────────────────────────────────
 # WARMUP_STEPS: number of physics steps for the joint-angle warm-up ramp.
@@ -296,7 +315,11 @@ ENABLE_RUNTIME_GAIT_CONTROL = False
 RUNTIME_GAIT_CONTROLLER  = "gait_control:strategy"
 
 RUNTIME_GAIT_POLL_EVERY  = 1             # poll the callback every N frames
-RUNTIME_GAIT_SWITCH_MODE = "zero_phase"  # "zero_phase" (continuous) | "immediate"
+RUNTIME_GAIT_SWITCH_MODE = "zero_phase"  # "zero_phase" (continuous) | "immediate" | "phase_locked"
+# "phase_locked": each robot keeps its t=0 clock across switches and changes
+# gait only at the end of a cycle shared by both gaits, so a robot returning
+# to a gait rejoins exactly its original phase.  "zero_phase" re-anchors the
+# phase at every switch and drifts.  See gait.py.
 RUNTIME_GAIT_VERBOSE     = False         # log every applied switch
 
 # For "gait_control:script": (seconds, "command text"), syntax table in gait.py.
@@ -348,9 +371,20 @@ STRATEGY_SPEC = {
     # skip_claimed on (below) such a robot is not selected in the first place;
     # the selector picks the next candidate in, so the role still gets its full
     # n_per_end.
+    # "large_group_ends" / "large_group_centers" act on EVERY group with size
+    # >= "min_group_size" (not just the largest), picking from that group's own
+    # members: "n_per_end" (+ "axis", "min_anisotropy") per group for the ends,
+    # "n" per group for the centre.  Those members are normally already claimed
+    # by group_rules, so these need "override_group": True to take effect.
     "roles": [
         # {"selector": "convex_hull", "command": -52,
         #  "n_frames_join": 18, "n_frames_leave": 18},
+        # {"selector": "large_group_ends", "command": -52, "min_group_size": 6,
+        #  "n_per_end": 2, "override_group": True,
+        #  "enabled_when": {"largest_group_size": (6, None)}},
+        # {"selector": "large_group_centers", "command": -52, "min_group_size": 6,
+        #  "n": 2, "override_group": True,
+        #  "enabled_when": {"largest_group_size": (6, None)}},
         {"selector": "group_minor_ends", "command": -52, "min_group_size": 3,
          "n_per_end": 6, "override_group": False},
     ],
@@ -426,6 +460,25 @@ RING_MASS      = (BASE_RING_MASS * (SCALE ** 2)
 # Good values: 2 (half-and-half), 4 (quadrants), 6, 8.
 # Works with all shape / movable combinations.
 RING_COLOR_BANDS = 4
+
+# Save the per-frame state a renderer needs (arm joint angles and the ring
+# outline) to trial_XXXX_render.npz.  Neither is recoverable afterwards:
+# POS_ALL carries only the body pose, and a movable ring is pushed out of shape
+# by the swarm.  With it, a video can be redrawn later -- different colours,
+# different ring styling, group shading -- without re-running the physics, so a
+# styling mistake costs a re-render instead of a re-run.
+# Collected only on the frames a video would encode, so the cost follows
+# VIDEO_STRIDE: ~22 MB per trial at N=100, ~20% on top of POS_ALL.
+SAVE_RENDER_STATE = _ov("SAVE_RENDER_STATE", True)
+
+# Legacy pair-coupling metrics: the per-frame n x n impact/correlation chain
+# that produces _impacts.csv, _GRs.npz and _GRs_ORDs_Mdist.csv.  Nothing in
+# this repo reads those three files any more -- the last consumer,
+# analysis/LoadingDataAnalysiswitntrending.py, is a stand-alone script that no
+# module imports -- and the chain is O(n^2) *per frame*, so it dominates
+# runtime at large n (~38% of a profiled N=500 run, against 11% for the
+# physics itself).  Off by default; set True to get those files back.
+LEGACY_PAIR_METRICS = _ov("LEGACY_PAIR_METRICS", False)
 
 # ── Actuation ─────────────────────────────────────────────────────────────────
 # === THIS IS WHERE YOU CONTROL JOINT MOTION ===
@@ -564,6 +617,16 @@ rho                 = N_SMARTICLES / (W * H)  # number density
 INIT_FILE = "init_conditions/init_conditions_200_p_N17.json"
 # Note: the robot count in the IC file must equal N_SMARTICLES; run_trial checks this on the spot.
 #   *_p_N17.json -> 17 robots   *_p_N50.json -> 50 robots   *_p.json -> 100 robots
+# INIT_FILE is opened as-is, so a relative INIT_FILE resolves against the
+# process's working directory (experiments.py / GetSpawnPositions.py run from
+# this code directory). INIT_FILE_REL is the alternative: a path relative to
+# the directory of the override file it is written in, e.g.
+#     "INIT_FILE_REL": "../init_conditions/init_conditions_200_p_N500.json"
+# When set, it replaces INIT_FILE; the resolved absolute path is stored back
+# into INIT_FILE and INIT_FILE_REL is reset to None, so config_snapshot.json
+# records the absolute path and re-running a snapshot from another directory
+# still finds the same file.
+INIT_FILE_REL = None
 EXP_NAME  = None      # None = auto-generated by naming.generate_trial_name
 OUT_ROOT  = "datafile"   # output root directory; each experiment lands under <OUT_ROOT>/<EXP_NAME>/
 PREVIEW    = False
@@ -612,6 +675,14 @@ if _skipped_derived:
     print(f"[config] Skipped {len(_skipped_derived)} derived quantities from the snapshot"
           f"(recomputed from input parameters): {', '.join(sorted(_skipped_derived)[:6])}"
           f"{' ...' if len(_skipped_derived) > 6 else ''}")
+
+# INIT_FILE_REL -> absolute INIT_FILE (see the Run-level settings above)
+if INIT_FILE_REL:
+    _ov_init_file = _OVERRIDES.get("INIT_FILE")
+    INIT_FILE = _resolve_init_file_rel(INIT_FILE_REL, _OV_PATH or None)
+    print(f"[config] INIT_FILE_REL = {INIT_FILE_REL!r} -> {INIT_FILE}"
+          + (f"  (replaces INIT_FILE = {_ov_init_file!r})" if _ov_init_file else ""))
+    INIT_FILE_REL = None
 
 
 # =============================================================================

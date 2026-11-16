@@ -87,8 +87,7 @@ import math
 
 import numpy as np
 
-from spatial_roles import (SELECTORS, SpatialRoleTracker,
-                           sel_largest_group_axis_ends)
+from spatial_roles import SELECTORS, SpatialRoleTracker
 
 
 # =============================================================================
@@ -145,12 +144,17 @@ def _check_selector_kwargs(selector, kwargs, where):
     exception gets swallowed by GaitController.poll into a single warning line,
     after which nothing happens silently every frame. Raise it here instead.
     """
-    if not kwargs:
-        return
-    fn = SELECTORS[selector] if isinstance(selector, str) else selector
+    # The name is checked first, and whether or not there are kwargs to check:
+    # the lookup used to come first, so this message was unreachable (the dict
+    # raised KeyError on the line above it), and with no extra kwargs the
+    # function returned before looking at all, leaving the same bare KeyError
+    # to surface from SpatialRoleTracker's constructor instead.
     if isinstance(selector, str) and selector not in SELECTORS:
         raise ValueError(f"{where}: unknown selector {selector!r}; "
                          f"choices: {sorted(SELECTORS)}")
+    if not kwargs:
+        return
+    fn = SELECTORS[selector] if isinstance(selector, str) else selector
     def _named(f):
         # Named parameters only: **kw / *args themselves are not passable names
         return {name for name, prm in inspect.signature(f).parameters.items()
@@ -161,8 +165,17 @@ def _check_selector_kwargs(selector, kwargs, where):
     if any(prm.kind is inspect.Parameter.VAR_KEYWORD
            for prm in inspect.signature(fn).parameters.values()):
         # e.g. sel_largest_group_major_ends(ids, pos, rec=None, **kw), whose
-        # kwargs ultimately land on the function it delegates to
-        accepted |= _named(sel_largest_group_axis_ends)
+        # kwargs ultimately land on the function it delegates to. Which one
+        # that is comes from the wrapper's own @delegates_to marker rather than
+        # being assumed: the wrappers delegate to three different functions
+        # (sel_principal_ends, sel_midline, sel_largest_group_axis_ends) with
+        # different parameter sets.
+        target = getattr(fn, "delegates_to", None)
+        if target is not None:
+            accepted |= _named(target)
+            # the wrapper fixes these itself, so a role setting them would
+            # collide with the positional value the wrapper passes
+            accepted -= set(getattr(fn, "pinned_kwargs", ()))
     if "exclude" in kwargs:
         raise ValueError(
             f"{where}: 'exclude' is not a role setting - the strategy fills it in "
